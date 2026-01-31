@@ -76,6 +76,17 @@ func TestSDKConstantImports(t *testing.T) {
 
 // TestPayloadDetection verifies payload type detection functions
 func TestPayloadDetection(t *testing.T) {
+	t.Run("nil payload detection", func(t *testing.T) {
+		assert.False(t, sdk.IsEIP3009Payload(nil), "nil should not be detected as EIP3009")
+		assert.False(t, sdk.IsPermit2Payload(nil), "nil should not be detected as Permit2")
+	})
+
+	t.Run("empty map payload detection", func(t *testing.T) {
+		empty := map[string]interface{}{}
+		assert.False(t, sdk.IsEIP3009Payload(empty), "empty map should not be detected as EIP3009")
+		assert.False(t, sdk.IsPermit2Payload(empty), "empty map should not be detected as Permit2")
+	})
+
 	t.Run("EIP3009 payload detection", func(t *testing.T) {
 		eip3009Payload := map[string]interface{}{
 			"authorization": map[string]interface{}{
