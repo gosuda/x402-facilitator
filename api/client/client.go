@@ -40,7 +40,7 @@ func (c *Client) Supported(ctx context.Context) ([]types.SupportedKind, error) {
 
 func (c *Client) Verify(ctx context.Context, payload *types.PaymentPayload, req *types.PaymentRequirements) (*types.PaymentVerifyResponse, error) {
 	body := types.PaymentVerifyRequest{
-		X402Version:         int(types.X402VersionV1),
+		X402Version:         int(types.X402VersionV2),
 		PaymentHeader:       *payload,
 		PaymentRequirements: *req,
 	}
@@ -55,7 +55,7 @@ func (c *Client) Verify(ctx context.Context, payload *types.PaymentPayload, req 
 // Settle sends a payment settlement request.
 func (c *Client) Settle(ctx context.Context, payload *types.PaymentPayload, req *types.PaymentRequirements) (*types.PaymentSettleResponse, error) {
 	body := types.PaymentSettleRequest{
-		X402Version:         int(types.X402VersionV1),
+		X402Version:         int(types.X402VersionV2),
 		PaymentHeader:       *payload,
 		PaymentRequirements: *req,
 	}

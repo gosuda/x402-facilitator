@@ -1,5 +1,6 @@
 package types
 
+// Scheme represents the blockchain scheme type
 type Scheme string
 
 const (
@@ -9,10 +10,5 @@ const (
 	Tron   Scheme = "tron"
 )
 
-type X402Version int
-
-const (
-	X402VersionV1 X402Version = 1
-)
-
+// Signer is a function type for signing digests
 type Signer func(digest []byte) (signature []byte, err error)

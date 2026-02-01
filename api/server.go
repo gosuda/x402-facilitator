@@ -4,13 +4,13 @@ import (
 	"encoding/json"
 	"net/http"
 
+	x402types "github.com/coinbase/x402/go/types"
 	_ "github.com/gosuda/x402-facilitator/api/swagger"
 	"github.com/labstack/echo/v4"
 	echomiddleware "github.com/labstack/echo/v4/middleware"
 	echoSwagger "github.com/swaggo/echo-swagger"
 
 	"github.com/gosuda/x402-facilitator/api/middleware"
-	"github.com/gosuda/x402-facilitator/facilitator"
 	"github.com/gosuda/x402-facilitator/types"
 )
 
@@ -19,12 +19,12 @@ import (
 // @description  API server for x402 payment facilitator
 type server struct {
 	*echo.Echo
-	facilitator facilitator.Facilitator
+	facilitator types.SchemeNetworkFacilitator
 }
 
 var _ http.Handler = (*server)(nil)
 
-func NewServer(facilitator facilitator.Facilitator) *server {
+func NewServer(facilitator types.SchemeNetworkFacilitator) *server {
 	s := &server{
 		Echo:        echo.New(),
 		facilitator: facilitator,
@@ -65,11 +65,24 @@ func (s *server) Settle(c echo.Context) error {
 		return echo.NewHTTPError(http.StatusBadRequest, "Received malformed settlement request")
 	}
 
-	settle, err := s.facilitator.Settle(ctx, &settleRequest.PaymentHeader, &settleRequest.PaymentRequirements)
+	// Convert local types to SDK types
+	sdkPayload := x402types.PaymentPayload(settleRequest.PaymentHeader.PaymentPayload)
+	sdkReq := x402types.PaymentRequirements(settleRequest.PaymentRequirements.PaymentRequirements)
+
+	settle, err := s.facilitator.Settle(ctx, sdkPayload, sdkReq)
 	if err != nil {
 		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
 	}
-	return c.JSON(http.StatusOK, settle)
+
+	// Convert SDK response to local response
+	response := &types.PaymentSettleResponse{
+		Success:   settle.Success,
+		TxHash:    settle.Transaction,
+		NetworkId: string(settle.Network),
+		Error:     settle.ErrorReason,
+	}
+
+	return c.JSON(http.StatusOK, response)
 }
 
 // Verify handles payment verification requests
@@ -92,12 +105,23 @@ func (s *server) Verify(c echo.Context) error {
 		return echo.NewHTTPError(http.StatusBadRequest, "Received malformed payment requirements")
 	}
 
-	verified, err := s.facilitator.Verify(ctx, &requirement.PaymentHeader, &requirement.PaymentRequirements)
+	// Convert local types to SDK types
+	sdkPayload := x402types.PaymentPayload(requirement.PaymentHeader.PaymentPayload)
+	sdkReq := x402types.PaymentRequirements(requirement.PaymentRequirements.PaymentRequirements)
+
+	verified, err := s.facilitator.Verify(ctx, sdkPayload, sdkReq)
 	if err != nil {
 		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
 	}
 
-	return c.JSON(http.StatusOK, verified)
+	// Convert SDK response to local response
+	response := &types.PaymentVerifyResponse{
+		IsValid:       verified.IsValid,
+		InvalidReason: verified.InvalidReason,
+		Payer:         verified.Payer,
+	}
+
+	return c.JSON(http.StatusOK, response)
 }
 
 // Supported returns the list of supported payment kinds
@@ -109,7 +133,14 @@ func (s *server) Verify(c echo.Context) error {
 // @Failure      404  {object}  echo.HTTPError
 // @Router       /supported [get]
 func (s *server) Supported(c echo.Context) error {
-	kinds := s.facilitator.Supported()
+	// Build supported kinds from facilitator's scheme info
+	kinds := []*types.SupportedKind{
+		{
+			Scheme:  s.facilitator.Scheme(),
+			Network: "eip155:*", // TODO: Get actual network from config
+		},
+	}
+
 	if len(kinds) == 0 {
 		return echo.NewHTTPError(http.StatusNotFound, "No supported payment kinds found")
 	}
