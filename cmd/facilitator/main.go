@@ -9,8 +9,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/rabbitprincess/x402-facilitator/api"
-	"github.com/rabbitprincess/x402-facilitator/facilitator"
+	"github.com/gosuda/x402-facilitator/api"
+	"github.com/gosuda/x402-facilitator/facilitator"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 	"github.com/spf13/cobra"

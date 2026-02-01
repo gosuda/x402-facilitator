@@ -11,9 +11,9 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/ethclient"
 
-	"github.com/rabbitprincess/x402-facilitator/scheme/evm"
-	"github.com/rabbitprincess/x402-facilitator/scheme/evm/eip3009"
-	"github.com/rabbitprincess/x402-facilitator/types"
+	"github.com/gosuda/x402-facilitator/scheme/evm"
+	"github.com/gosuda/x402-facilitator/scheme/evm/eip3009"
+	"github.com/gosuda/x402-facilitator/types"
 )
 
 var _ Facilitator = (*EVMFacilitator)(nil)

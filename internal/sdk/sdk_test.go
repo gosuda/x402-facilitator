@@ -3,7 +3,7 @@ package sdk_test
 import (
 	"testing"
 
-	"github.com/rabbitprincess/x402-facilitator/internal/sdk"
+	"github.com/gosuda/x402-facilitator/internal/sdk"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

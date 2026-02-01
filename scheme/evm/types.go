@@ -14,7 +14,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"golang.org/x/crypto/sha3"
 
-	"github.com/rabbitprincess/x402-facilitator/types"
+	"github.com/gosuda/x402-facilitator/types"
 )
 
 func NewEVMPayload(chain, token, from, to string, value string, signer types.Signer) (*EVMPayload, error) {

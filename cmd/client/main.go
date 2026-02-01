@@ -4,9 +4,9 @@ import (
 	"encoding/hex"
 	"encoding/json"
 
-	"github.com/rabbitprincess/x402-facilitator/api/client"
-	"github.com/rabbitprincess/x402-facilitator/scheme/evm"
-	"github.com/rabbitprincess/x402-facilitator/types"
+	"github.com/gosuda/x402-facilitator/api/client"
+	"github.com/gosuda/x402-facilitator/scheme/evm"
+	"github.com/gosuda/x402-facilitator/types"
 	"github.com/rs/zerolog/log"
 	"github.com/spf13/cobra"
 )

@@ -1,4 +1,4 @@
-module github.com/rabbitprincess/x402-facilitator
+module github.com/gosuda/x402-facilitator
 
 go 1.24.2
 

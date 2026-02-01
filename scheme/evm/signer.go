@@ -10,7 +10,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	ethTypes "github.com/ethereum/go-ethereum/core/types"
 
-	"github.com/rabbitprincess/x402-facilitator/types"
+	"github.com/gosuda/x402-facilitator/types"
 )
 
 func NewRawPrivateSigner(privateKey []byte) types.Signer {

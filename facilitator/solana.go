@@ -8,7 +8,7 @@ import (
 	"github.com/blocto/solana-go-sdk/client"
 	solTypes "github.com/blocto/solana-go-sdk/types"
 
-	"github.com/rabbitprincess/x402-facilitator/types"
+	"github.com/gosuda/x402-facilitator/types"
 )
 
 type SolanaFacilitator struct {
