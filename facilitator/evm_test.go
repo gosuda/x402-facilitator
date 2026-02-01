@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/rabbitprincess/x402-facilitator/scheme/evm"
-	"github.com/rabbitprincess/x402-facilitator/types"
+	"github.com/gosuda/x402-facilitator/scheme/evm"
+	"github.com/gosuda/x402-facilitator/types"
 	"github.com/stretchr/testify/require"
 )
 

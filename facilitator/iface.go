@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/rabbitprincess/x402-facilitator/types"
+	"github.com/gosuda/x402-facilitator/types"
 )
 
 type Facilitator interface {

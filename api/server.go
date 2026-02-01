@@ -4,14 +4,14 @@ import (
 	"encoding/json"
 	"net/http"
 
+	_ "github.com/gosuda/x402-facilitator/api/swagger"
 	"github.com/labstack/echo/v4"
 	echomiddleware "github.com/labstack/echo/v4/middleware"
-	_ "github.com/rabbitprincess/x402-facilitator/api/swagger"
 	echoSwagger "github.com/swaggo/echo-swagger"
 
-	"github.com/rabbitprincess/x402-facilitator/api/middleware"
-	"github.com/rabbitprincess/x402-facilitator/facilitator"
-	"github.com/rabbitprincess/x402-facilitator/types"
+	"github.com/gosuda/x402-facilitator/api/middleware"
+	"github.com/gosuda/x402-facilitator/facilitator"
+	"github.com/gosuda/x402-facilitator/types"
 )
 
 // @title        x402 Facilitator API
