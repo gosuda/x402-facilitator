@@ -13,51 +13,47 @@ import (
 	"github.com/gosuda/x402-facilitator/facilitator"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
-	"github.com/spf13/cobra"
 )
-
-var cmd = &cobra.Command{
-	Use:   "x402-facilitator",
-	Short: "Start the facilitator server",
-	Run: func(cmd *cobra.Command, args []string) {
-		run()
-	},
-}
-
-var (
-	configPath string
-)
-
-func init() {
-	cmd.PersistentFlags().StringVarP(&configPath, "config", "c", "config.toml", "Path to the configuration file")
-}
 
 func main() {
-	if err := cmd.Execute(); err != nil {
-		log.Fatal().Err(err).Msg("Failed to execute command")
+	// Check for help flag manually before koanf processing
+	for _, arg := range os.Args[1:] {
+		if arg == "-h" || arg == "-help" || arg == "--help" {
+			printUsage()
+			os.Exit(0)
+		}
 	}
-}
 
-func run() {
-	config, err := LoadConfig(configPath)
+	// Load configuration
+	config, err := LoadConfig()
 	if err != nil {
-		log.Fatal().Err(err).Msg("Failed to load configuration, shutting down...")
+		if err.Error() == "flag: help requested" {
+			printUsage()
+			os.Exit(0)
+		}
+		fmt.Fprintf(os.Stderr, "Failed to load configuration: %v\n", err)
+		os.Exit(1)
 	}
+
+	// Setup logger
 	log.Logger = zerolog.New(os.Stdout).With().Timestamp().Caller().Logger()
 
-	facilitator, err := facilitator.NewFacilitator(config.Scheme, config.Network, config.Url, config.PrivateKey)
+	// Create facilitator
+	fac, err := facilitator.NewFacilitator(config.Scheme, config.Network, config.Url, config.PrivateKey)
 	if err != nil {
 		log.Fatal().Err(err).Msg("Failed to init facilitator, shutting down...")
 	}
 
-	api := api.NewServer(facilitator)
+	// Create API server
+	apiServer := api.NewServer(fac)
 
-	// Initialize Server
+	// Initialize HTTP server
 	server := &http.Server{
 		Addr:    fmt.Sprintf(":%d", config.Port),
-		Handler: api,
+		Handler: apiServer,
 	}
 
+	// Start server in goroutine
 	go func() {
 		log.Info().Msgf("Starting server on port %d", config.Port)
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
@@ -65,11 +61,12 @@ func run() {
 		}
 	}()
 
-	// Graceful shutdown handling
-	// Wait for interrupt signal to gracefully shutdown the server
+	// Graceful shutdown
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, os.Interrupt, syscall.SIGTERM)
 	<-quit
+
+	log.Info().Msg("Shutting down server...")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

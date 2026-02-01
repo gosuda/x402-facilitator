@@ -1,108 +1,64 @@
 package main
 
 import (
-	"encoding/hex"
-	"encoding/json"
+	"fmt"
+	"os"
 
 	"github.com/gosuda/x402-facilitator/api/client"
-	"github.com/gosuda/x402-facilitator/scheme/evm"
 	"github.com/gosuda/x402-facilitator/types"
 	"github.com/rs/zerolog/log"
-	"github.com/spf13/cobra"
 )
-
-var cmd = &cobra.Command{
-	Use:   "x402-client",
-	Short: "Start the facilitator client",
-	Run:   run,
-}
-
-var (
-	url     string
-	scheme  string
-	network string
-	token   string
-	from    string
-	to      string
-	amount  string
-	privkey string
-)
-
-func init() {
-	fs := cmd.PersistentFlags()
-
-	fs.StringVarP(&url, "url", "u", "http://localhost:9090", "Base URL of the facilitator server")
-	fs.StringVarP(&scheme, "scheme", "s", "evm", "Scheme to use")
-	fs.StringVarP(&network, "network", "n", "base-sepolia", "Blockchain network to use")
-	fs.StringVarP(&token, "token", "t", "USDC", "token contract for sending")
-	fs.StringVarP(&from, "from", "F", "", "Sender address")
-	fs.StringVarP(&to, "to", "T", "", "Recipient address")
-	fs.StringVarP(&amount, "amount", "A", "", "Amount to send")
-	fs.StringVarP(&privkey, "privkey", "P", "", "Sender private key")
-}
 
 func main() {
-	if err := cmd.Execute(); err != nil {
-		log.Fatal().Err(err).Msg("Failed to execute command")
+	// Check for help flag manually before koanf processing
+	for _, arg := range os.Args[1:] {
+		if arg == "-h" || arg == "--help" || arg == "-help" {
+			printUsage()
+			os.Exit(0)
+		}
 	}
-}
 
-func run(cmd *cobra.Command, args []string) {
-	client, err := client.NewClient(url)
+	// Load configuration
+	config, err := LoadConfig()
 	if err != nil {
-		log.Fatal().Err(err).Msg("Failed to create client")
+		if err.Error() == "flag: help requested" {
+			printUsage()
+			os.Exit(0)
+		}
+		fmt.Fprintf(os.Stderr, "Failed to load configuration: %v\n", err)
+		os.Exit(1)
 	}
 
-	// Here you would implement the logic to interact with the facilitator server
-	// using the provided parameters.
-	log.Info().Msg("Sending payment request")
-	var paymentPayload *types.PaymentPayload
-	var paymentRequirements *types.PaymentRequirements
-	switch scheme {
-	case "evm":
-		priv, err := hex.DecodeString(privkey)
-		if err != nil {
-			log.Fatal().Err(err).Msg("Failed to decode private key")
-		}
-		evmPayload, err := evm.NewEVMPayload(network, token, from, to, amount, evm.NewRawPrivateSigner(priv))
-		if err != nil {
-			log.Fatal().Err(err).Msg("Failed to create EVM payload")
-		}
-		jsonPayload, err := json.Marshal(evmPayload)
-		if err != nil {
-			log.Fatal().Err(err).Msg("Failed to marshal EVM payload to JSON")
-		}
-		paymentPayload = &types.PaymentPayload{
-			X402Version: int(types.X402VersionV1),
-			Scheme:      scheme,
-			Network:     network,
-			Payload:     jsonPayload,
-		}
-		paymentRequirements = &types.PaymentRequirements{
-			Scheme:  scheme,
-			Network: network,
-			PayTo:   to,
-			Asset:   token,
-		}
+	// Validate required fields
+	if config.From == "" || config.To == "" || config.Amount == "" || config.PrivateKey == "" {
+		fmt.Fprintf(os.Stderr, "Error: Required flags missing\n")
+		fmt.Fprintf(os.Stderr, "Usage: %s --from <addr> --to <addr> --amount <amt> --privateKey <key> [options]\n\n", os.Args[0])
+		printUsage()
+		os.Exit(1)
 	}
 
-	verifyResp, err := client.Verify(cmd.Context(), paymentPayload, paymentRequirements)
-	if err != nil {
-		log.Fatal().Err(err).Msg("Failed to verify payment")
-	}
-	if !verifyResp.IsValid {
-		log.Error().Str("invalidReason", verifyResp.InvalidReason).Msg("Payment verification failed")
-		return
-	}
+	// TODO: Implement SDK-based client
+	// This requires implementing ClientEvmSigner interface from x402 SDK
+	// and using types.NewExactEvmScheme() to create payment payload
 
-	settleResp, err := client.Settle(cmd.Context(), paymentPayload, paymentRequirements)
-	if err != nil {
-		log.Fatal().Err(err).Msg("Failed to settle payment")
-	}
-	if !settleResp.Success {
-		log.Error().Msg("Payment settlement failed")
-		return
-	}
-	log.Info().Msg("Payment settled successfully")
+	log.Info().
+		Str("url", config.URL).
+		Str("scheme", config.Scheme).
+		Str("network", config.Network).
+		Str("token", config.Token).
+		Str("from", config.From).
+		Str("to", config.To).
+		Str("amount", config.Amount).
+		Msg("x402-client SDK implementation pending")
 
+	log.Info().Msg("This client will use x402 SDK's ClientEvmSigner to create V2 payment payloads")
+
+	// Example of what this should do:
+	// 1. Create a ClientEvmSigner implementation
+	// 2. Use types.NewExactEvmScheme(signer, config) to create scheme
+	// 3. Call scheme.CreatePaymentPayload() to generate V2 payload
+	// 4. Send to facilitator via api/client
+
+	_, _ = client.NewClient(config.URL)
+	_ = types.X402VersionV2
 }

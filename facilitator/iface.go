@@ -1,29 +1,28 @@
 package facilitator
 
 import (
-	"context"
 	"fmt"
 
+	evmfacilitator "github.com/gosuda/x402-facilitator/facilitator/evm"
+	solanafacilitator "github.com/gosuda/x402-facilitator/facilitator/solana"
+	suifacilitator "github.com/gosuda/x402-facilitator/facilitator/sui"
+	tronfacilitator "github.com/gosuda/x402-facilitator/facilitator/tron"
 	"github.com/gosuda/x402-facilitator/types"
 )
 
-type Facilitator interface {
-	Verify(ctx context.Context, payment *types.PaymentPayload, req *types.PaymentRequirements) (*types.PaymentVerifyResponse, error)
-	Settle(ctx context.Context, payment *types.PaymentPayload, req *types.PaymentRequirements) (*types.PaymentSettleResponse, error)
-	Supported() []*types.SupportedKind
-}
-
-func NewFacilitator(scheme types.Scheme, network, rpcUrl string, privateKeyHex string) (Facilitator, error) {
+// NewFacilitator creates a new facilitator for the given scheme.
+// It returns a types.SchemeNetworkFacilitator (SDK interface).
+func NewFacilitator(scheme types.Scheme, network, rpcUrl string, privateKeyHex string) (types.SchemeNetworkFacilitator, error) {
 	switch scheme {
 	case types.EVM:
-		return NewEVMFacilitator(network, rpcUrl, privateKeyHex)
+		return evmfacilitator.NewFacilitator(network, rpcUrl, privateKeyHex)
 	case types.Solana:
-		return NewSolanaFacilitator(network, rpcUrl, privateKeyHex)
+		return solanafacilitator.NewFacilitator(network, rpcUrl, privateKeyHex)
 	case types.Sui:
-		return NewSuiFacilitator(network, rpcUrl, privateKeyHex)
+		return suifacilitator.NewFacilitator(network, rpcUrl, privateKeyHex)
 	case types.Tron:
-		return NewTronFacilitator(network, rpcUrl, privateKeyHex)
+		return tronfacilitator.NewFacilitator(network, rpcUrl, privateKeyHex)
 	default:
-		return nil, fmt.Errorf("unsupporsed scheme: %s", scheme)
+		return nil, fmt.Errorf("unsupported scheme: %s", scheme)
 	}
 }

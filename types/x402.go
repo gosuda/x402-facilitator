@@ -1,32 +1,26 @@
-// Package sdk provides re-exports of the x402 SDK types and functions.
-// This package serves as a single point of import for SDK functionality,
-// ensuring consistent usage across the project.
-//
-// Principle: SDK provides functionality - never reimplement what SDK offers.
-package sdk
+package types
+
+// x402 SDK re-exports
+// This file provides a single import point for all x402 SDK types and functions.
 
 import (
 	x402 "github.com/coinbase/x402/go"
 	"github.com/coinbase/x402/go/mechanisms/evm"
 	"github.com/coinbase/x402/go/mechanisms/evm/exact/facilitator"
-	"github.com/coinbase/x402/go/types"
+	x402types "github.com/coinbase/x402/go/types"
 )
 
 // =============================================================================
-// Type Aliases - Core Types
+// Core Types (V2)
 // =============================================================================
 
 type (
-	// PaymentPayload represents the V2 payment payload sent by clients
-	PaymentPayload = types.PaymentPayload
+	// SDK types (use directly when needed)
+	SDKPaymentPayload      = x402types.PaymentPayload
+	SDKPaymentRequirements = x402types.PaymentRequirements
+	SDKSupportedKind       = x402types.SupportedKind
 
-	// PaymentRequirements defines the payment requirements from the resource server
-	PaymentRequirements = types.PaymentRequirements
-
-	// SupportedKind represents a supported scheme and network pair
-	SupportedKind = types.SupportedKind
-
-	// Network represents a blockchain network identifier (CAIP-2 format)
+	// Network is the blockchain network identifier (CAIP-2 format)
 	Network = x402.Network
 
 	// VerifyResponse is the response from payment verification
@@ -37,11 +31,11 @@ type (
 )
 
 // =============================================================================
-// Type Aliases - EVM Types
+// EVM Types
 // =============================================================================
 
 type (
-	// ExactEIP3009Authorization represents the EIP-3009 TransferWithAuthorization data
+	// ExactEIP3009Authorization represents EIP-3009 TransferWithAuthorization data
 	ExactEIP3009Authorization = evm.ExactEIP3009Authorization
 
 	// ExactEIP3009Payload represents the exact payment payload for EVM networks
@@ -50,9 +44,11 @@ type (
 	// ExactPermit2Payload represents the Permit2 payment payload
 	ExactPermit2Payload = evm.ExactPermit2Payload
 
-	// FacilitatorEvmSigner is the interface that must be implemented
-	// to connect the SDK to actual EVM RPC endpoints
+	// FacilitatorEvmSigner is the interface for facilitator EVM operations
 	FacilitatorEvmSigner = evm.FacilitatorEvmSigner
+
+	// ClientEvmSigner is the interface for client-side EVM signing
+	ClientEvmSigner = evm.ClientEvmSigner
 
 	// TypedDataDomain represents the EIP-712 domain separator
 	TypedDataDomain = evm.TypedDataDomain
@@ -68,19 +64,19 @@ type (
 )
 
 // =============================================================================
-// Type Aliases - Facilitator Types
+// Facilitator Types
 // =============================================================================
 
 type (
-	// X402Facilitator is the main facilitator type that manages payment mechanisms
+	// X402Facilitator is the main facilitator type
 	X402Facilitator = x402.X402Facilitator
 
-	// SchemeNetworkFacilitator interface for V2 facilitator mechanisms
+	// SchemeNetworkFacilitator is the interface for V2 facilitator mechanisms
 	SchemeNetworkFacilitator = x402.SchemeNetworkFacilitator
 )
 
 // =============================================================================
-// Function Re-exports - Facilitator
+// Functions - Facilitator
 // =============================================================================
 
 var (
@@ -92,7 +88,7 @@ var (
 )
 
 // =============================================================================
-// Function Re-exports - Signature Verification
+// Functions - Signature Verification
 // =============================================================================
 
 var (
@@ -107,7 +103,7 @@ var (
 )
 
 // =============================================================================
-// Function Re-exports - EIP-712 Hashing
+// Functions - EIP-712 Hashing
 // =============================================================================
 
 var (
@@ -119,7 +115,7 @@ var (
 )
 
 // =============================================================================
-// Function Re-exports - ERC-6492
+// Functions - ERC-6492
 // =============================================================================
 
 var (
@@ -131,7 +127,7 @@ var (
 )
 
 // =============================================================================
-// Function Re-exports - Payload Detection
+// Functions - Payload Detection
 // =============================================================================
 
 var (
@@ -149,7 +145,7 @@ var (
 )
 
 // =============================================================================
-// Function Re-exports - Network Configuration
+// Functions - Network Configuration
 // =============================================================================
 
 var (
@@ -158,19 +154,31 @@ var (
 
 	// GetAssetInfo returns asset information for a given network and asset address
 	GetAssetInfo = evm.GetAssetInfo
+
+	// GetEvmChainId extracts the EVM chain ID from a CAIP-2 network identifier
+	GetEvmChainId = evm.GetEvmChainId
 )
 
 // =============================================================================
-// Function Re-exports - Utilities
+// Functions - Utilities
 // =============================================================================
 
 var (
 	// HexToBytes converts a hex string to bytes
 	HexToBytes = evm.HexToBytes
+
+	// CreateNonce generates a random 32-byte nonce for EIP-3009 authorizations
+	CreateNonce = evm.CreateNonce
+
+	// ParseAmount converts a decimal amount to the smallest unit
+	ParseAmount = evm.ParseAmount
+
+	// FormatAmount converts an amount in smallest unit to decimal
+	FormatAmount = evm.FormatAmount
 )
 
 // =============================================================================
-// Constants Re-exports
+// Constants
 // =============================================================================
 
 const (
@@ -185,7 +193,7 @@ const (
 )
 
 // =============================================================================
-// ABI Re-exports
+// ABI Constants
 // =============================================================================
 
 var (
