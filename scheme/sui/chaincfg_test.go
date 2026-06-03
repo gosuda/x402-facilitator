@@ -43,7 +43,19 @@ func TestGetGaslessStablecoinType(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, USDCType, coinType)
 
+	coinType, ok = GetGaslessStablecoinType("sui:testnet", "USDC")
+	require.True(t, ok)
+	require.Equal(t, TestnetUSDCType, coinType)
+
+	coinType, ok = GetGaslessStablecoinType("sui:testnet", TestnetUSDCType)
+	require.True(t, ok)
+	require.Equal(t, TestnetUSDCType, coinType)
+
+	_, ok = GetGaslessStablecoinType("sui:testnet", USDCType)
+	require.False(t, ok)
+
 	require.Len(t, GetGaslessStablecoinTypes("sui:mainnet"), len(DefaultGaslessStablecoinTypeList))
+	require.Equal(t, TestnetUSDCType, GetGaslessStablecoinTypes("sui:testnet")[0])
 	_, ok = GetGaslessStablecoinType("sui:mainnet", "NOT_A_TOKEN")
 	require.False(t, ok)
 	require.Nil(t, GetNetworkInfo("sui:unknown"))
@@ -58,6 +70,10 @@ func TestGetGaslessStablecoinDecimals(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, uint8(6), decimals)
 	require.Equal(t, "10000", MinimumGaslessStablecoinAmount(decimals).String())
+
+	decimals, ok = GetGaslessStablecoinDecimals("sui:testnet", TestnetUSDCType)
+	require.True(t, ok)
+	require.Equal(t, uint8(6), decimals)
 
 	_, ok = GetGaslessStablecoinDecimals("sui:mainnet", "NOT_A_TOKEN")
 	require.False(t, ok)
