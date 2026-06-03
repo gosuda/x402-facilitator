@@ -92,6 +92,42 @@ func TestTransactionCommandKeepsUnknownWrappedKind(t *testing.T) {
 	require.NotEmpty(t, command.Raw)
 }
 
+func TestDryRunTransactionBlockParsesNumericObjectVersions(t *testing.T) {
+	raw := []byte(`{
+		"input": {
+			"transaction": {
+				"transactions": [
+					{"MoveCall": {
+						"package": "0x2",
+						"module": "coin",
+						"function": "send_funds",
+						"type_arguments": ["` + USDCType + `"]
+					}}
+				]
+			},
+			"gasData": {
+				"payment": [{"objectId": "0x9", "version": 9, "digest": "11111111111111111111111111111111"}],
+				"price": "0",
+				"budget": "0"
+			}
+		},
+		"effects": {
+			"status": {"status": "success"},
+			"mutated": [{
+				"reference": {"objectId": "0x1", "version": 7, "digest": "11111111111111111111111111111111"}
+			}],
+			"deleted": [{"objectId": "0x2", "version": "8", "digest": "11111111111111111111111111111111"}]
+		}
+	}`)
+
+	parsed, err := ParseDryRunTransactionBlock(raw)
+	require.NoError(t, err)
+	require.NotNil(t, parsed.Effects.Mutated[0].Reference)
+	require.Equal(t, ObjectVersion("7"), parsed.Effects.Mutated[0].Reference.Version)
+	require.Equal(t, ObjectVersion("8"), parsed.Effects.Deleted[0].Version)
+	require.Equal(t, ObjectVersion("9"), parsed.Input.GasData.Payment[0].Version)
+}
+
 func TestGaslessStablecoinPaymentRejectsUnsupportedMoveCall(t *testing.T) {
 	dryRun := DryRunTransactionBlock{
 		Input: TransactionBlockData{
@@ -112,7 +148,7 @@ func TestGaslessStablecoinPaymentRejectsUnsupportedMoveCall(t *testing.T) {
 	require.ErrorContains(t, dryRun.ValidateGaslessStablecoinPayment(USDCType), "unsupported Move call")
 }
 
-func TestGaslessStablecoinPaymentAllowsCoinObjectCommands(t *testing.T) {
+func TestGaslessStablecoinPaymentRejectsCoinObjectCommands(t *testing.T) {
 	dryRun := DryRunTransactionBlock{
 		Input: TransactionBlockData{
 			Transaction: &TransactionKind{
@@ -134,7 +170,7 @@ func TestGaslessStablecoinPaymentAllowsCoinObjectCommands(t *testing.T) {
 		ObjectChanges: []ObjectChange{{Type: "mutated"}},
 	}
 
-	require.NoError(t, dryRun.ValidateGaslessStablecoinPayment(USDCType))
+	require.ErrorContains(t, dryRun.ValidateGaslessStablecoinPayment(USDCType), "transaction writes objects")
 }
 
 func TestGaslessStablecoinPaymentRejectsGasPayment(t *testing.T) {
@@ -218,10 +254,10 @@ func TestBuildGaslessStablecoinTransferTransactionUsesTestnetUSDC(t *testing.T) 
 	require.Equal(t, NormalizeType(TestnetUSDCType), NormalizeType(programmable.Commands[0].MoveCall.TypeArguments[0].String()))
 }
 
-func TestBuildGaslessStablecoinTransferTransactionUsesCoinObjectWhenProvided(t *testing.T) {
+func TestBuildGaslessStablecoinTransferTransactionRejectsCoinObjectInputs(t *testing.T) {
 	coinObject := testObjectRef(t, "0x1234", 7)
 
-	txBytes, err := BuildGaslessStablecoinTransferTransaction(context.Background(), GaslessStablecoinTransfer{
+	_, err := BuildGaslessStablecoinTransferTransaction(context.Background(), GaslessStablecoinTransfer{
 		Sender:     "0x123",
 		Recipient:  "0xabc",
 		Network:    "sui:testnet",
@@ -230,40 +266,38 @@ func TestBuildGaslessStablecoinTransferTransactionUsesCoinObjectWhenProvided(t *
 		CoinObject: &coinObject,
 		Expiration: testValidDuringExpiration(t),
 	})
-	require.NoError(t, err)
+	require.ErrorContains(t, err, "coin object inputs are not supported")
 
-	txData, err := bcs.Unmarshal[gaslessStablecoinTransactionData](txBytes)
-	require.NoError(t, err)
-	require.NotNil(t, txData.V1)
-	require.Empty(t, txData.V1.GasData.Payment)
-	require.Equal(t, uint64(0), txData.V1.GasData.Price)
-	require.Equal(t, uint64(0), txData.V1.GasData.Budget)
-	require.NotNil(t, txData.V1.Expiration.ValidDuring)
+	_, err = BuildGaslessStablecoinTransferTransaction(context.Background(), GaslessStablecoinTransfer{
+		Sender:         "0x123",
+		Recipient:      "0xabc",
+		Network:        "sui:mainnet",
+		Asset:          "USDC",
+		Amount:         "1000000",
+		UseCoinObjects: true,
+		Expiration:     testValidDuringExpiration(t),
+	})
+	require.ErrorContains(t, err, "coin object inputs are not supported")
 
-	programmable := txData.V1.Kind.ProgrammableTransaction
-	require.NotNil(t, programmable)
-	require.Len(t, programmable.Inputs, 3)
-	require.NotNil(t, programmable.Inputs[0].Object)
-	require.Equal(t, coinObject, *programmable.Inputs[0].Object.ImmOrOwnedObject)
-	require.NotNil(t, programmable.Inputs[1].Pure)
-	require.NotNil(t, programmable.Inputs[2].Pure)
-
-	require.Len(t, programmable.Commands, 2)
-	require.NotNil(t, programmable.Commands[0].SplitCoins)
-	require.NotNil(t, programmable.Commands[1].MoveCall)
-	moveCall := programmable.Commands[1].MoveCall
-	require.Equal(t, "coin", moveCall.Module)
-	require.Equal(t, "send_funds", moveCall.Function)
-	require.Equal(t, NormalizeType(TestnetUSDCType), NormalizeType(moveCall.TypeArguments[0].String()))
-	require.NotNil(t, moveCall.Arguments[0].NestedResult)
-	require.Equal(t, uint16(0), moveCall.Arguments[0].NestedResult.Index)
-	require.Equal(t, uint16(0), moveCall.Arguments[0].NestedResult.ResultIndex)
-	require.NotNil(t, moveCall.Arguments[1].Input)
-	require.Equal(t, uint16(2), *moveCall.Arguments[1].Input)
+	_, err = BuildGaslessStablecoinTransferTransaction(context.Background(), GaslessStablecoinTransfer{
+		Sender:    "0x123",
+		Recipient: "0xabc",
+		Network:   "sui:mainnet",
+		Asset:     "USDC",
+		Amount:    "1000000",
+		CoinObjects: []OwnedCoinObject{{
+			ObjectRef: coinObject,
+			CoinType:  USDCType,
+			Balance:   1000000,
+		}},
+		Expiration: testValidDuringExpiration(t),
+	})
+	require.ErrorContains(t, err, "coin object inputs are not supported")
 }
 
-func TestBuildCoinObjectToAddressBalanceTransferTransactionSendsWholeCoinObject(t *testing.T) {
+func TestBuildCoinObjectToAddressBalanceTransferTransactionUsesBalanceSendFunds(t *testing.T) {
 	coinObject := testObjectRef(t, "0x1234", 7)
+	gasObject := testObjectRef(t, "0x5678", 8)
 
 	txBytes, err := BuildCoinObjectToAddressBalanceTransferTransaction(context.Background(), CoinObjectToAddressBalanceTransfer{
 		Sender:     "0x123",
@@ -271,6 +305,10 @@ func TestBuildCoinObjectToAddressBalanceTransferTransactionSendsWholeCoinObject(
 		Network:    "sui:testnet",
 		Asset:      "USDC",
 		CoinObject: coinObject,
+		Amount:     "1000000",
+		GasPayment: []ObjectRef{gasObject},
+		GasPrice:   1000,
+		GasBudget:  5000000,
 	})
 	require.NoError(t, err)
 
@@ -278,23 +316,26 @@ func TestBuildCoinObjectToAddressBalanceTransferTransactionSendsWholeCoinObject(
 	require.NoError(t, err)
 	require.NotNil(t, txData.V1)
 	require.Equal(t, NormalizeAddress("0x123"), txData.V1.Sender.String())
-	require.Empty(t, txData.V1.GasData.Payment)
-	require.Equal(t, uint64(0), txData.V1.GasData.Price)
-	require.Equal(t, uint64(0), txData.V1.GasData.Budget)
+	require.Equal(t, []ObjectRef{gasObject}, txData.V1.GasData.Payment)
+	require.Equal(t, uint64(1000), txData.V1.GasData.Price)
+	require.Equal(t, uint64(5000000), txData.V1.GasData.Budget)
 	require.NotNil(t, txData.V1.Expiration.None)
 
 	programmable := txData.V1.Kind.ProgrammableTransaction
 	require.NotNil(t, programmable)
 	require.Len(t, programmable.Inputs, 2)
-	require.NotNil(t, programmable.Inputs[0].Object)
-	require.Equal(t, coinObject, *programmable.Inputs[0].Object.ImmOrOwnedObject)
+	require.NotNil(t, programmable.Inputs[0].FundsWithdrawal)
+	require.NotNil(t, programmable.Inputs[0].FundsWithdrawal.Reservation.MaxAmountU64)
+	require.Equal(t, uint64(1000000), *programmable.Inputs[0].FundsWithdrawal.Reservation.MaxAmountU64)
+	require.NotNil(t, programmable.Inputs[0].FundsWithdrawal.TypeArg.Balance)
+	require.Equal(t, NormalizeType(TestnetUSDCType), NormalizeType(programmable.Inputs[0].FundsWithdrawal.TypeArg.Balance.String()))
 	require.NotNil(t, programmable.Inputs[1].Pure)
 
 	require.Len(t, programmable.Commands, 1)
 	require.NotNil(t, programmable.Commands[0].MoveCall)
 	moveCall := programmable.Commands[0].MoveCall
 	require.Equal(t, NormalizeAddress("0x2"), moveCall.Package.String())
-	require.Equal(t, "coin", moveCall.Module)
+	require.Equal(t, "balance", moveCall.Module)
 	require.Equal(t, "send_funds", moveCall.Function)
 	require.Equal(t, NormalizeType(TestnetUSDCType), NormalizeType(moveCall.TypeArguments[0].String()))
 	require.Len(t, moveCall.Arguments, 2)
@@ -304,7 +345,7 @@ func TestBuildCoinObjectToAddressBalanceTransferTransactionSendsWholeCoinObject(
 	require.Equal(t, uint16(1), *moveCall.Arguments[1].Input)
 }
 
-func TestBuildCoinObjectToAddressBalanceTransferTransactionSplitsAmount(t *testing.T) {
+func TestBuildCoinObjectToAddressBalanceTransferTransactionUsesAmountWithdrawal(t *testing.T) {
 	coinObject := testObjectRef(t, "0x1234", 7)
 	gasObject := testObjectRef(t, "0x5678", 8)
 
@@ -331,31 +372,53 @@ func TestBuildCoinObjectToAddressBalanceTransferTransactionSplitsAmount(t *testi
 
 	programmable := txData.V1.Kind.ProgrammableTransaction
 	require.NotNil(t, programmable)
-	require.Len(t, programmable.Inputs, 3)
-	require.NotNil(t, programmable.Inputs[0].Object)
+	require.Len(t, programmable.Inputs, 2)
+	require.NotNil(t, programmable.Inputs[0].FundsWithdrawal)
+	require.NotNil(t, programmable.Inputs[0].FundsWithdrawal.Reservation.MaxAmountU64)
+	require.Equal(t, uint64(1000000), *programmable.Inputs[0].FundsWithdrawal.Reservation.MaxAmountU64)
 	require.NotNil(t, programmable.Inputs[1].Pure)
-	require.NotNil(t, programmable.Inputs[2].Pure)
 
-	require.Len(t, programmable.Commands, 2)
-	require.NotNil(t, programmable.Commands[0].SplitCoins)
-	split := programmable.Commands[0].SplitCoins
-	require.NotNil(t, split.Coin.Input)
-	require.Equal(t, uint16(0), *split.Coin.Input)
-	require.Len(t, split.Amounts, 1)
-	require.NotNil(t, split.Amounts[0].Input)
-	require.Equal(t, uint16(1), *split.Amounts[0].Input)
-
-	require.NotNil(t, programmable.Commands[1].MoveCall)
-	moveCall := programmable.Commands[1].MoveCall
-	require.Equal(t, "coin", moveCall.Module)
+	require.Len(t, programmable.Commands, 1)
+	require.NotNil(t, programmable.Commands[0].MoveCall)
+	moveCall := programmable.Commands[0].MoveCall
+	require.Equal(t, "balance", moveCall.Module)
 	require.Equal(t, "send_funds", moveCall.Function)
 	require.Equal(t, NormalizeType(USDCType), NormalizeType(moveCall.TypeArguments[0].String()))
 	require.Len(t, moveCall.Arguments, 2)
-	require.NotNil(t, moveCall.Arguments[0].NestedResult)
-	require.Equal(t, uint16(0), moveCall.Arguments[0].NestedResult.Index)
-	require.Equal(t, uint16(0), moveCall.Arguments[0].NestedResult.ResultIndex)
+	require.NotNil(t, moveCall.Arguments[0].Input)
+	require.Equal(t, uint16(0), *moveCall.Arguments[0].Input)
 	require.NotNil(t, moveCall.Arguments[1].Input)
-	require.Equal(t, uint16(2), *moveCall.Arguments[1].Input)
+	require.Equal(t, uint16(1), *moveCall.Arguments[1].Input)
+}
+
+func TestBuildCoinObjectToAddressBalanceTransferTransactionAllowsGaslessStablecoin(t *testing.T) {
+	txBytes, err := BuildCoinObjectToAddressBalanceTransferTransaction(context.Background(), CoinObjectToAddressBalanceTransfer{
+		Sender:     "0x123",
+		Recipient:  "0xabc",
+		Network:    "sui:testnet",
+		Asset:      "USDC",
+		Amount:     "1000000",
+		Expiration: testValidDuringExpiration(t),
+	})
+	require.NoError(t, err)
+
+	txData, err := bcs.Unmarshal[gaslessStablecoinTransactionData](txBytes)
+	require.NoError(t, err)
+	require.NotNil(t, txData.V1)
+	require.Empty(t, txData.V1.GasData.Payment)
+	require.Equal(t, uint64(0), txData.V1.GasData.Price)
+	require.Equal(t, uint64(0), txData.V1.GasData.Budget)
+	require.NotNil(t, txData.V1.Expiration.ValidDuring)
+
+	programmable := txData.V1.Kind.ProgrammableTransaction
+	require.NotNil(t, programmable)
+	require.Len(t, programmable.Inputs, 2)
+	require.NotNil(t, programmable.Inputs[0].FundsWithdrawal)
+	require.NotNil(t, programmable.Commands[0].MoveCall)
+	moveCall := programmable.Commands[0].MoveCall
+	require.Equal(t, "balance", moveCall.Module)
+	require.Equal(t, "send_funds", moveCall.Function)
+	require.Equal(t, NormalizeType(TestnetUSDCType), NormalizeType(moveCall.TypeArguments[0].String()))
 }
 
 func TestBuildCoinObjectToAddressBalanceTransferTransactionRejectsNonAllowlistedGaslessAsset(t *testing.T) {
@@ -364,9 +427,24 @@ func TestBuildCoinObjectToAddressBalanceTransferTransactionRejectsNonAllowlisted
 		Recipient:  "0xabc",
 		Network:    "sui:mainnet",
 		Asset:      "0x2::sui::SUI",
-		CoinObject: testObjectRef(t, "0x1234", 7),
+		Amount:     "1000000",
+		Expiration: testValidDuringExpiration(t),
 	})
 	require.ErrorContains(t, err, "gasless stablecoin allowlisted asset")
+}
+
+func TestBuildCoinObjectToAddressBalanceTransferTransactionRequiresAmount(t *testing.T) {
+	_, err := BuildCoinObjectToAddressBalanceTransferTransaction(context.Background(), CoinObjectToAddressBalanceTransfer{
+		Sender:     "0x123",
+		Recipient:  "0xabc",
+		Network:    "sui:mainnet",
+		Asset:      "USDC",
+		CoinObject: testObjectRef(t, "0x1234", 7),
+		GasPayment: []ObjectRef{testObjectRef(t, "0x5678", 8)},
+		GasPrice:   1000,
+		GasBudget:  5000000,
+	})
+	require.ErrorContains(t, err, "invalid amount")
 }
 
 func TestNewGaslessStablecoinPaymentPayload(t *testing.T) {
@@ -466,6 +544,48 @@ func TestResolveGaslessStablecoinExpirationUsesRPC(t *testing.T) {
 	require.Equal(t, []string{"suix_getLatestSuiSystemState"}, methods)
 }
 
+func TestListOwnedGaslessStablecoinCoinObjects(t *testing.T) {
+	var methods []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var rpcReq suiTransactionRPCRequest
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&rpcReq))
+		methods = append(methods, rpcReq.Method)
+
+		switch rpcReq.Method {
+		case "suix_getCoins":
+			require.Len(t, rpcReq.Params, 4)
+			require.Equal(t, NormalizeAddress("0x123"), rpcReq.Params[0])
+			require.Equal(t, TestnetUSDCType, rpcReq.Params[1])
+			require.Nil(t, rpcReq.Params[2])
+			require.Equal(t, float64(suiCoinObjectPageLimit), rpcReq.Params[3])
+			require.NoError(t, json.NewEncoder(w).Encode(map[string]interface{}{
+				"jsonrpc": "2.0",
+				"id":      rpcReq.ID,
+				"result": map[string]interface{}{
+					"data": []map[string]interface{}{
+						suiCoinObjectRPCResult("0x1234", "7", "400000", TestnetUSDCType),
+						suiCoinObjectRPCResult("0x5678", "8", "700000", TestnetUSDCType),
+					},
+					"nextCursor":  nil,
+					"hasNextPage": false,
+				},
+			}))
+		default:
+			t.Fatalf("unexpected rpc method %s", rpcReq.Method)
+		}
+	}))
+	defer server.Close()
+
+	coinObjects, err := ListOwnedGaslessStablecoinCoinObjects(context.Background(), "sui:testnet", "0x123", "USDC", []string{server.URL})
+	require.NoError(t, err)
+	require.Equal(t, []string{"suix_getCoins"}, methods)
+	require.Len(t, coinObjects, 2)
+	require.Equal(t, NormalizeAddress("0x1234"), coinObjects[0].ObjectRef.ObjectID.String())
+	require.Equal(t, uint64(7), coinObjects[0].ObjectRef.Version)
+	require.Equal(t, uint64(400000), coinObjects[0].Balance)
+	require.Equal(t, NormalizeType(TestnetUSDCType), NormalizeType(coinObjects[0].CoinType))
+}
+
 func moveCallTransactionCommand(pkg string, module string, function string, typeArguments []string) json.RawMessage {
 	raw, err := json.Marshal(map[string]interface{}{
 		"MoveCall": map[string]interface{}{
@@ -511,6 +631,16 @@ func testObjectRef(t *testing.T, objectID string, version uint64) ObjectRef {
 		ObjectID: parsedObjectID,
 		Version:  version,
 		Digest:   digest,
+	}
+}
+
+func suiCoinObjectRPCResult(objectID string, version string, balance string, coinType string) map[string]interface{} {
+	return map[string]interface{}{
+		"coinType":     coinType,
+		"coinObjectId": objectID,
+		"version":      version,
+		"digest":       "11111111111111111111111111111111",
+		"balance":      balance,
 	}
 }
 

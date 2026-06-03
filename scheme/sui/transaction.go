@@ -28,6 +28,7 @@ const (
 	transactionDataDigestTag = "TransactionData::"
 	addressLength            = 32
 	digestLength             = 32
+	suiCoinObjectPageLimit   = 50
 
 	CommandKindMoveCall        = "MoveCall"
 	CommandKindTransferObjects = "TransferObjects"
@@ -217,9 +218,41 @@ type ObjectOwnerResult struct {
 }
 
 type ObjectRefResult struct {
-	ObjectID Address `json:"objectId"`
-	Version  string  `json:"version"`
-	Digest   Digest  `json:"digest"`
+	ObjectID Address       `json:"objectId"`
+	Version  ObjectVersion `json:"version"`
+	Digest   Digest        `json:"digest"`
+}
+
+type ObjectVersion string
+
+func (v ObjectVersion) MarshalJSON() ([]byte, error) {
+	return json.Marshal(string(v))
+}
+
+func (v *ObjectVersion) UnmarshalJSON(data []byte) error {
+	raw := strings.TrimSpace(string(data))
+	if raw == "" || raw == "null" {
+		*v = ""
+		return nil
+	}
+
+	var quoted string
+	if err := json.Unmarshal(data, &quoted); err == nil {
+		quoted = strings.TrimSpace(quoted)
+		if quoted != "" {
+			if _, err := strconv.ParseUint(quoted, 10, 64); err != nil {
+				return fmt.Errorf("invalid object version %q: %w", quoted, err)
+			}
+		}
+		*v = ObjectVersion(quoted)
+		return nil
+	}
+
+	if _, err := strconv.ParseUint(raw, 10, 64); err != nil {
+		return fmt.Errorf("invalid object version %q: %w", raw, err)
+	}
+	*v = ObjectVersion(raw)
+	return nil
 }
 
 type GasData struct {
@@ -275,10 +308,22 @@ type GaslessStablecoinTransfer struct {
 	Amount    string
 	Endpoints []string
 
-	// CoinObject optionally pays from an owned Coin<T> object in the same
-	// gasless transaction. If nil, the transaction withdraws from address
-	// balance.
+	// Deprecated: coin object inputs are not supported in the gasless payment
+	// transaction. Prepare address balance in a separate gas-paid or sponsored
+	// transaction before building the payment.
+	UseCoinObjects bool
+
+	// Deprecated: coin object inputs are not supported in the gasless payment
+	// transaction.
 	CoinObject *ObjectRef
+
+	// Deprecated: coin object inputs are not supported in the gasless payment
+	// transaction.
+	CoinObjects []OwnedCoinObject
+
+	// Deprecated: coin object inputs are not supported in the gasless payment
+	// transaction.
+	MaxCoinObjects int
 
 	// Expiration can be provided to build fully offline. If nil, the builder
 	// resolves a ValidDuring expiration from the network using Endpoints plus
@@ -286,25 +331,42 @@ type GaslessStablecoinTransfer struct {
 	Expiration *TransactionExpiration
 }
 
-// CoinObjectToAddressBalanceTransfer builds a PTB that deposits a Coin<T>
-// object into an address balance by calling 0x2::coin::send_funds<T>.
+type OwnedCoinObject struct {
+	ObjectRef ObjectRef `json:"objectRef"`
+	CoinType  string    `json:"coinType,omitempty"`
+	Balance   uint64    `json:"balance"`
+}
+
+// CoinObjectToAddressBalanceTransfer builds a PTB that deposits token balance
+// into an address balance using 0x2::balance::send_funds<T>. Amount is required
+// because the transaction uses a balance withdrawal intent instead of passing
+// Coin<T> objects directly into Move calls.
 type CoinObjectToAddressBalanceTransfer struct {
-	Sender     string
-	Recipient  string
-	Network    string
-	Asset      string
+	Sender    string
+	Recipient string
+	Network   string
+	Asset     string
+
+	// CoinObject is retained for callers that want to track which object balance
+	// they are preparing. It is validated when present, but is not passed as a
+	// Move call argument.
 	CoinObject ObjectRef
 
-	// Amount optionally sends only part of CoinObject by first splitting the
-	// coin. If empty, the whole coin object is deposited.
+	// Amount is the balance amount to deposit. To sweep selected objects, sum
+	// their balances from ListOwnedGaslessStablecoinCoinObjects first.
 	Amount string
 
-	// Leave GasPayment empty with zero GasPrice and GasBudget to build a
-	// protocol gasless transaction. Gasless mode is only valid for gasless
-	// stablecoin allowlisted assets.
+	// Leave GasPayment empty with zero GasPrice and GasBudget to build the
+	// gasless stablecoin balance-send pattern. Gasless mode requires an
+	// allowlisted stablecoin asset.
 	GasPayment []ObjectRef
 	GasPrice   uint64
 	GasBudget  uint64
+
+	// Expiration can be provided to build fully offline. If nil and GasPayment
+	// is empty, the builder resolves a ValidDuring expiration from Network.
+	Expiration *TransactionExpiration
+	Endpoints  []string
 }
 
 type TransactionExpiration struct {
@@ -367,6 +429,9 @@ func (r DryRunTransactionBlock) ValidateGaslessStablecoinPayment(asset string) e
 	if !r.Gasless() {
 		return errors.New("transaction is not gasless")
 	}
+	if transactionEffectsHasObjectWrites(&r.Effects) || len(r.ObjectChanges) > 0 {
+		return errors.New("transaction writes objects")
+	}
 
 	commands := TransactionCommands(r.Input.Transaction)
 	if len(commands) == 0 {
@@ -375,19 +440,12 @@ func (r DryRunTransactionBlock) ValidateGaslessStablecoinPayment(asset string) e
 
 	moveCallCount := 0
 	for _, command := range commands {
-		switch command.Kind {
-		case CommandKindMoveCall:
-			if command.MoveCall == nil {
-				return fmt.Errorf("unsupported programmable command %q", command.Kind)
-			}
-			moveCallCount++
-			if err := ValidateGaslessStablecoinMoveCall(*command.MoveCall, asset); err != nil {
-				return err
-			}
-		case CommandKindSplitCoins, CommandKindMergeCoins:
-			continue
-		default:
+		if command.Kind != CommandKindMoveCall || command.MoveCall == nil {
 			return fmt.Errorf("unsupported programmable command %q", command.Kind)
+		}
+		moveCallCount++
+		if err := ValidateGaslessStablecoinMoveCall(*command.MoveCall, asset); err != nil {
+			return err
 		}
 	}
 	if moveCallCount == 0 {
@@ -537,6 +595,17 @@ func transactionEffectsStatusError(e *TransactionEffects, fallback string) strin
 	return fallback
 }
 
+func transactionEffectsHasObjectWrites(e *TransactionEffects) bool {
+	if e == nil {
+		return false
+	}
+	return len(e.Created) > 0 ||
+		len(e.Mutated) > 0 ||
+		len(e.Deleted) > 0 ||
+		len(e.Wrapped) > 0 ||
+		len(e.Unwrapped) > 0
+}
+
 func OwnerAddress(owner interface{}) string {
 	switch value := owner.(type) {
 	case nil:
@@ -616,20 +685,12 @@ func BuildGaslessStablecoinTransferTransaction(ctx context.Context, transfer Gas
 	if err != nil || amount == 0 {
 		return nil, fmt.Errorf("invalid amount: %s", transfer.Amount)
 	}
+	if transfer.UseCoinObjects || transfer.CoinObject != nil || len(transfer.CoinObjects) > 0 {
+		return nil, errors.New("coin object inputs are not supported in gasless stablecoin payment; prepare address balance first")
+	}
 	expiration, err := gaslessStablecoinTransferExpiration(ctx, transfer)
 	if err != nil {
 		return nil, err
-	}
-
-	if transfer.CoinObject != nil {
-		return buildCoinObjectToAddressBalanceTransferTransaction(ctx, CoinObjectToAddressBalanceTransfer{
-			Sender:     sender,
-			Recipient:  recipient,
-			Network:    transfer.Network,
-			Asset:      coinType,
-			CoinObject: *transfer.CoinObject,
-			Amount:     strconv.FormatUint(amount, 10),
-		}, expiration)
 	}
 
 	senderAddress, err := ParseAddress(sender)
@@ -714,7 +775,26 @@ func BuildGaslessStablecoinTransferTransaction(ctx context.Context, transfer Gas
 }
 
 func BuildCoinObjectToAddressBalanceTransferTransaction(ctx context.Context, transfer CoinObjectToAddressBalanceTransfer) ([]byte, error) {
-	return buildCoinObjectToAddressBalanceTransferTransaction(ctx, transfer, TransactionExpiration{None: &struct{}{}})
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	expiration := TransactionExpiration{None: &struct{}{}}
+	if len(transfer.GasPayment) == 0 {
+		if transfer.Expiration != nil {
+			expiration = *transfer.Expiration
+		} else {
+			resolved, err := ResolveGaslessStablecoinExpiration(ctx, transfer.Network, transfer.Endpoints)
+			if err != nil {
+				return nil, err
+			}
+			expiration = *resolved
+		}
+	} else if transfer.Expiration != nil {
+		expiration = *transfer.Expiration
+	}
+
+	return buildCoinObjectToAddressBalanceTransferTransaction(ctx, transfer, expiration)
 }
 
 func buildCoinObjectToAddressBalanceTransferTransaction(ctx context.Context, transfer CoinObjectToAddressBalanceTransfer, expiration TransactionExpiration) ([]byte, error) {
@@ -733,19 +813,21 @@ func buildCoinObjectToAddressBalanceTransferTransaction(ctx context.Context, tra
 	if recipient == "" {
 		return nil, errors.New("empty recipient")
 	}
-	if err := validateObjectRef("coin object", transfer.CoinObject); err != nil {
-		return nil, err
-	}
-	if err := validateGasPayment(transfer.CoinObject, transfer.GasPayment, transfer.GasPrice, transfer.GasBudget); err != nil {
-		return nil, err
-	}
-
 	coinType, err := resolveCoinAssetType(transfer.Network, transfer.Asset)
 	if err != nil {
 		return nil, err
 	}
-	if len(transfer.GasPayment) == 0 && !isGaslessStablecoinAsset(transfer.Network, coinType) {
-		return nil, fmt.Errorf("gasless coin object transfer requires a gasless stablecoin allowlisted asset: %s", transfer.Asset)
+	amount, err := strconv.ParseUint(strings.TrimSpace(transfer.Amount), 10, 64)
+	if err != nil || amount == 0 {
+		return nil, fmt.Errorf("invalid amount: %s", transfer.Amount)
+	}
+	if !isZeroObjectRef(transfer.CoinObject) {
+		if err := validateObjectRef("coin object", transfer.CoinObject); err != nil {
+			return nil, err
+		}
+	}
+	if err := validateGasPayment(transfer.CoinObject, transfer.GasPayment, transfer.GasPrice, transfer.GasBudget, transfer.Network, coinType); err != nil {
+		return nil, err
 	}
 	senderAddress, err := ParseAddress(sender)
 	if err != nil {
@@ -768,12 +850,20 @@ func buildCoinObjectToAddressBalanceTransferTransaction(ctx context.Context, tra
 		return nil, err
 	}
 
-	coinInput := uint16(0)
+	balanceInput := uint16(0)
 	recipientInput := uint16(1)
 	inputs := []gaslessStablecoinCallArg{
 		{
-			Object: &ObjectArg{
-				ImmOrOwnedObject: &transfer.CoinObject,
+			FundsWithdrawal: &gaslessStablecoinFundsWithdrawal{
+				Reservation: gaslessStablecoinReservation{
+					MaxAmountU64: &amount,
+				},
+				TypeArg: gaslessStablecoinWithdrawalType{
+					Balance: &coinTypeTag,
+				},
+				WithdrawFrom: gaslessStablecoinWithdrawFrom{
+					Sender: &struct{}{},
+				},
 			},
 		},
 		{
@@ -786,59 +876,15 @@ func buildCoinObjectToAddressBalanceTransferTransaction(ctx context.Context, tra
 		{
 			MoveCall: &ProgrammableMoveCall{
 				Package:       packageAddress,
-				Module:        "coin",
+				Module:        "balance",
 				Function:      "send_funds",
 				TypeArguments: []TypeTag{coinTypeTag},
 				Arguments: []Argument{
-					{Input: &coinInput},
+					{Input: &balanceInput},
 					{Input: &recipientInput},
 				},
 			},
 		},
-	}
-
-	if strings.TrimSpace(transfer.Amount) != "" {
-		amount, err := strconv.ParseUint(strings.TrimSpace(transfer.Amount), 10, 64)
-		if err != nil || amount == 0 {
-			return nil, fmt.Errorf("invalid amount: %s", transfer.Amount)
-		}
-		amountBytes, err := bcs.Marshal(&amount)
-		if err != nil {
-			return nil, err
-		}
-		amountInput := uint16(1)
-		recipientInput = uint16(2)
-		splitCommand := uint16(0)
-		splitResult := uint16(0)
-		inputs = []gaslessStablecoinCallArg{
-			inputs[0],
-			{
-				Pure: &Pure{
-					Bytes: amountBytes,
-				},
-			},
-			inputs[1],
-		}
-		commands = []Command{
-			{
-				SplitCoins: &SplitCoins{
-					Coin:    Argument{Input: &coinInput},
-					Amounts: []Argument{{Input: &amountInput}},
-				},
-			},
-			{
-				MoveCall: &ProgrammableMoveCall{
-					Package:       packageAddress,
-					Module:        "coin",
-					Function:      "send_funds",
-					TypeArguments: []TypeTag{coinTypeTag},
-					Arguments: []Argument{
-						{NestedResult: &NestedResult{Index: splitCommand, ResultIndex: splitResult}},
-						{Input: &recipientInput},
-					},
-				},
-			},
-		}
 	}
 
 	gasPayment := append([]ObjectRef(nil), transfer.GasPayment...)
@@ -869,8 +915,7 @@ func buildCoinObjectToAddressBalanceTransferTransaction(ctx context.Context, tra
 }
 
 func validateObjectRef(name string, ref ObjectRef) error {
-	var zero Address
-	if ref.ObjectID == zero {
+	if isZeroAddress(ref.ObjectID) {
 		return fmt.Errorf("%s object ID is empty", name)
 	}
 	if len(ref.Digest) != digestLength {
@@ -879,10 +924,13 @@ func validateObjectRef(name string, ref ObjectRef) error {
 	return nil
 }
 
-func validateGasPayment(coinObject ObjectRef, gasPayment []ObjectRef, gasPrice uint64, gasBudget uint64) error {
+func validateGasPayment(coinObject ObjectRef, gasPayment []ObjectRef, gasPrice uint64, gasBudget uint64, network string, coinType string) error {
 	if len(gasPayment) == 0 {
 		if gasPrice != 0 || gasBudget != 0 {
 			return errors.New("gas payment is required when gas price or budget is non-zero")
+		}
+		if !isGaslessStablecoinAsset(network, coinType) {
+			return fmt.Errorf("gasless balance transfer requires a gasless stablecoin allowlisted asset: %s", coinType)
 		}
 		return nil
 	}
@@ -896,11 +944,20 @@ func validateGasPayment(coinObject ObjectRef, gasPayment []ObjectRef, gasPrice u
 		if err := validateObjectRef(fmt.Sprintf("gas payment %d", i), payment); err != nil {
 			return err
 		}
-		if payment.ObjectID == coinObject.ObjectID {
+		if !isZeroObjectRef(coinObject) && payment.ObjectID == coinObject.ObjectID {
 			return errors.New("coin object cannot also be used as gas payment")
 		}
 	}
 	return nil
+}
+
+func isZeroObjectRef(ref ObjectRef) bool {
+	return isZeroAddress(ref.ObjectID) && ref.Version == 0 && len(ref.Digest) == 0
+}
+
+func isZeroAddress(address Address) bool {
+	var zero Address
+	return address == zero
 }
 
 func gaslessStablecoinTransferExpiration(ctx context.Context, transfer GaslessStablecoinTransfer) (TransactionExpiration, error) {
@@ -944,6 +1001,53 @@ func ResolveGaslessStablecoinExpiration(ctx context.Context, network string, end
 		return nil, errors.New("failed to resolve gasless stablecoin expiration")
 	}
 	return expiration, nil
+}
+
+func ListOwnedGaslessStablecoinCoinObjects(ctx context.Context, network string, owner string, asset string, endpoints []string) ([]OwnedCoinObject, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	owner = NormalizeAddress(owner)
+	if owner == "" {
+		return nil, errors.New("empty owner")
+	}
+	coinType, err := resolveGaslessStablecoinAsset(network, asset)
+	if err != nil {
+		return nil, err
+	}
+
+	endpointInput := append([]string{}, endpoints...)
+	if info := GetNetworkInfo(network); info != nil {
+		endpointInput = append(endpointInput, info.DefaultURLs...)
+	}
+	candidates := utils.EndpointCandidates(endpointInput)
+	if len(candidates) == 0 {
+		return nil, fmt.Errorf("no Sui RPC endpoints for network %q", network)
+	}
+
+	var coinObjects []OwnedCoinObject
+	_, err = utils.DoWithEndpoint(ctx, candidates, func(ctx context.Context, endpoint string) error {
+		client := suiTransactionRPCClient{
+			endpoint: endpoint,
+			httpClient: &http.Client{
+				Timeout: 30 * time.Second,
+			},
+		}
+		fetched, err := client.listOwnedCoinObjects(ctx, owner, coinType)
+		if err != nil {
+			return err
+		}
+		coinObjects = fetched
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to list Sui coin objects: %w", err)
+	}
+	return coinObjects, nil
 }
 
 func resolveGaslessStablecoinExpirationFromEndpoint(ctx context.Context, endpoint string, chainDigest string) (*TransactionExpiration, error) {
@@ -1069,6 +1173,31 @@ func (c suiTransactionRPCClient) call(ctx context.Context, method string, params
 	return json.Unmarshal(rpcResp.Result, result)
 }
 
+func (c suiTransactionRPCClient) listOwnedCoinObjects(ctx context.Context, owner string, coinType string) ([]OwnedCoinObject, error) {
+	var coinObjects []OwnedCoinObject
+	var cursor *string
+
+	for {
+		var page suiCoinObjectPage
+		if err := c.call(ctx, "suix_getCoins", []interface{}{owner, coinType, cursor, suiCoinObjectPageLimit}, &page); err != nil {
+			return nil, err
+		}
+		for i, coin := range page.Data {
+			coinObject, err := coin.ownedCoinObject()
+			if err != nil {
+				return nil, fmt.Errorf("invalid coin object %d: %w", len(coinObjects)+i, err)
+			}
+			coinObjects = append(coinObjects, coinObject)
+		}
+		if !page.HasNextPage || page.NextCursor == nil || strings.TrimSpace(*page.NextCursor) == "" {
+			break
+		}
+		cursor = page.NextCursor
+	}
+
+	return coinObjects, nil
+}
+
 type suiTransactionRPCRequest struct {
 	JSONRPC string        `json:"jsonrpc"`
 	ID      int           `json:"id"`
@@ -1087,6 +1216,54 @@ type suiTransactionRPCError struct {
 	Code    int             `json:"code"`
 	Message string          `json:"message"`
 	Data    json.RawMessage `json:"data,omitempty"`
+}
+
+type suiCoinObjectPage struct {
+	Data        []suiCoinObjectResult `json:"data"`
+	NextCursor  *string               `json:"nextCursor"`
+	HasNextPage bool                  `json:"hasNextPage"`
+}
+
+type suiCoinObjectResult struct {
+	CoinType     string `json:"coinType"`
+	CoinObjectID string `json:"coinObjectId"`
+	ObjectID     string `json:"objectId,omitempty"`
+	Version      string `json:"version"`
+	Digest       string `json:"digest"`
+	Balance      string `json:"balance"`
+}
+
+func (r suiCoinObjectResult) ownedCoinObject() (OwnedCoinObject, error) {
+	objectID := strings.TrimSpace(r.CoinObjectID)
+	if objectID == "" {
+		objectID = strings.TrimSpace(r.ObjectID)
+	}
+	parsedObjectID, err := ParseAddress(objectID)
+	if err != nil {
+		return OwnedCoinObject{}, err
+	}
+	version, err := strconv.ParseUint(strings.TrimSpace(r.Version), 10, 64)
+	if err != nil {
+		return OwnedCoinObject{}, fmt.Errorf("invalid version %q: %w", r.Version, err)
+	}
+	digest, err := ParseDigest(r.Digest)
+	if err != nil {
+		return OwnedCoinObject{}, err
+	}
+	balance, err := strconv.ParseUint(strings.TrimSpace(r.Balance), 10, 64)
+	if err != nil {
+		return OwnedCoinObject{}, fmt.Errorf("invalid balance %q: %w", r.Balance, err)
+	}
+
+	return OwnedCoinObject{
+		ObjectRef: ObjectRef{
+			ObjectID: parsedObjectID,
+			Version:  version,
+			Digest:   digest,
+		},
+		CoinType: r.CoinType,
+		Balance:  balance,
+	}, nil
 }
 
 func (e *suiTransactionRPCError) Error() string {
@@ -1528,7 +1705,7 @@ func ValidateGaslessStablecoinMoveCall(moveCall MoveCallCommand, asset string) e
 	if NormalizeAddress(moveCall.Package) != NormalizeAddress("0x2") {
 		return fmt.Errorf("unsupported Move package %q", moveCall.Package)
 	}
-	if !IsAllowedGaslessStablecoinMoveCall(moveCall.Module, moveCall.Function) {
+	if moveCall.Module != "balance" || moveCall.Function != "send_funds" {
 		return fmt.Errorf("unsupported Move call %s::%s", moveCall.Module, moveCall.Function)
 	}
 	if len(moveCall.TypeArguments) == 0 {
@@ -1543,22 +1720,6 @@ func ValidateGaslessStablecoinMoveCall(moveCall MoveCallCommand, asset string) e
 	}
 
 	return nil
-}
-
-func IsAllowedGaslessStablecoinMoveCall(module string, function string) bool {
-	switch module {
-	case "balance":
-		switch function {
-		case "send_funds", "redeem_funds", "withdrawal_split":
-			return true
-		}
-	case "coin":
-		switch function {
-		case "send_funds", "into_balance":
-			return true
-		}
-	}
-	return false
 }
 
 func resolveGaslessStablecoinAsset(network string, asset string) (string, error) {
