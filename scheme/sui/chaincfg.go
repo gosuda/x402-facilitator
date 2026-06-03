@@ -58,13 +58,19 @@ func GetGaslessStablecoinTypes(network string) []string {
 
 	types := make([]string, 0, len(info.StablecoinTypes))
 	seen := make(map[string]struct{}, len(info.StablecoinTypes))
-	for _, coinType := range DefaultGaslessStablecoinTypeList {
-		if _, ok := stablecoinTypeInMap(info.StablecoinTypes, coinType); ok {
+	for _, symbol := range DefaultGaslessStablecoinSymbolList {
+		if coinType, ok := stablecoinTypeBySymbol(info.StablecoinTypes, symbol); ok {
 			types = append(types, coinType)
 			seen[NormalizeType(coinType)] = struct{}{}
 		}
 	}
-	for _, coinType := range info.StablecoinTypes {
+	symbols := make([]string, 0, len(info.StablecoinTypes))
+	for symbol := range info.StablecoinTypes {
+		symbols = append(symbols, symbol)
+	}
+	slices.Sort(symbols)
+	for _, symbol := range symbols {
+		coinType := info.StablecoinTypes[symbol]
 		if _, ok := seen[NormalizeType(coinType)]; !ok {
 			types = append(types, coinType)
 		}
@@ -137,7 +143,7 @@ var networkInfo = map[string]NetworkInfo{
 		NetworkID:          "testnet",
 		ChainDigest:        "69WiPg3DAQiwdxfncX6wYQ2siKwAe6L9BZthQea3JNMD",
 		DefaultURLs:        []string{"https://sui-testnet-rpc.publicnode.com", "https://fullnode.testnet.sui.io:443"},
-		StablecoinTypes:    defaultStablecoinTypesBySymbol(),
+		StablecoinTypes:    testnetStablecoinTypesBySymbol(),
 		StablecoinDecimals: defaultStablecoinDecimalsBySymbol(),
 	},
 	"sui:localnet": {
@@ -160,6 +166,22 @@ func defaultStablecoinTypesBySymbol() map[string]string {
 		"AUSD":     AUSDType,
 		"USDB":     USDBType,
 	}
+}
+
+func testnetStablecoinTypesBySymbol() map[string]string {
+	types := defaultStablecoinTypesBySymbol()
+	types["USDC"] = TestnetUSDCType
+	return types
+}
+
+func stablecoinTypeBySymbol(stablecoinTypes map[string]string, symbol string) (string, bool) {
+	normalizedSymbol := NormalizeType(symbol)
+	for candidate, coinType := range stablecoinTypes {
+		if NormalizeType(candidate) == normalizedSymbol {
+			return coinType, true
+		}
+	}
+	return "", false
 }
 
 func defaultGaslessStablecoinDecimals(asset string) (uint8, bool) {
