@@ -3,15 +3,18 @@ package sui
 import (
 	"context"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
-	"net/http"
-	"net/http/httptest"
+	"net"
 	"strings"
 	"testing"
 
+	rpcv2 "github.com/gosuda/x402-facilitator/scheme/sui/grpc/pb/sui/rpc/v2"
 	bcs "github.com/iotaledger/bcs-go"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/types/known/fieldmaskpb"
 )
 
 func TestBuildGaslessStablecoinTransferTransactionUsesTestnetUSDC(t *testing.T) {
@@ -109,10 +112,12 @@ func TestBuildCoinObjectsToAddressBalanceTransferTransactionUsesAllObjects(t *te
 }
 
 func TestManualSuiTestnetObjectToBalanceThenBalanceToRecipientBroadcast(t *testing.T) {
+	// privateKey := ""
+	// privateKey := ""
 	privateKey := ""
 	from := ""
 	to := ""
-	rpcURL := "https://sui-testnet-rpc.publicnode.com"
+	rpcURL := "https://fullnode.testnet.sui.io:443"
 	paymentAmount := "10000"
 
 	if strings.TrimSpace(privateKey) == "" || strings.TrimSpace(to) == "" {
@@ -143,8 +148,150 @@ func TestManualSuiTestnetObjectToBalanceThenBalanceToRecipientBroadcast(t *testi
 		fmt.Printf("prepared %d objects totaling %s into address balance: %s\n", len(result.CoinObjects), result.PreparedAmount, result.PrepareTransaction.Digest.String())
 	}
 	require.NotNil(t, result.PaymentTransaction)
-	require.Equal(t, paymentAmount, TransactionResultBalanceDelta(result.PaymentTransaction, to, TestnetUSDCType).String())
+	paymentDelta := TransactionResultBalanceDelta(result.PaymentTransaction, to, TestnetUSDCType)
+	if NormalizeAddress(from) == NormalizeAddress(to) {
+		require.Zero(t, paymentDelta.Sign())
+	} else {
+		require.Equal(t, paymentAmount, paymentDelta.String())
+	}
 	fmt.Printf("sent %s testnet USDC address balance to %s: %s\n", paymentAmount, NormalizeAddress(to), result.PaymentTransaction.Digest.String())
+}
+
+func TestExecuteGaslessStablecoinObjectBalancePaymentResolvesExpirationOnce(t *testing.T) {
+	signer := newTestSigner(t)
+	recipient := "0xabc"
+	var methods []string
+	executeCount := 0
+	endpoint, closeServer := newSuiTransactionGRPCTestServer(t, &suiTransactionGRPCTestServer{
+		methods: &methods,
+		getServiceInfo: func(ctx context.Context, req *rpcv2.GetServiceInfoRequest) (*rpcv2.GetServiceInfoResponse, error) {
+			return &rpcv2.GetServiceInfoResponse{Epoch: ptr(uint64(42))}, nil
+		},
+		getBalance: func(ctx context.Context, req *rpcv2.GetBalanceRequest) (*rpcv2.GetBalanceResponse, error) {
+			require.Equal(t, signer.Address(), req.GetOwner())
+			require.Equal(t, TestnetUSDCType, req.GetCoinType())
+			return suiBalanceGRPCResult(TestnetUSDCType, 0, 400000), nil
+		},
+		listOwnedObjects: func(ctx context.Context, req *rpcv2.ListOwnedObjectsRequest) (*rpcv2.ListOwnedObjectsResponse, error) {
+			require.Equal(t, signer.Address(), req.GetOwner())
+			return &rpcv2.ListOwnedObjectsResponse{
+				Objects: []*rpcv2.Object{
+					suiCoinObjectGRPCResult("0x1234", 7, 400000, TestnetUSDCType),
+				},
+			}, nil
+		},
+		execute: func(ctx context.Context, req *rpcv2.ExecuteTransactionRequest) (*rpcv2.ExecuteTransactionResponse, error) {
+			executeCount++
+			requireReadMask(t, req.GetReadMask(), "digest", "effects.status", "balance_changes", "checkpoint", "timestamp")
+			return &rpcv2.ExecuteTransactionResponse{
+				Transaction: suiExecutedTransactionGRPCResult("11111111111111111111111111111111", recipient, TestnetUSDCType, "10000"),
+			}, nil
+		},
+	})
+	defer closeServer()
+
+	result, err := ExecuteGaslessStablecoinObjectBalancePayment(context.Background(), GaslessStablecoinObjectBalancePayment{
+		Sender:    signer.Address(),
+		Recipient: recipient,
+		Network:   "sui:testnet",
+		Asset:     "USDC",
+		Amount:    "10000",
+		Endpoints: []string{endpoint},
+	}, signer)
+	require.NoError(t, err)
+	require.NotNil(t, result.PrepareTransaction)
+	require.NotNil(t, result.PaymentTransaction)
+	require.Equal(t, 2, executeCount)
+	require.Equal(t, []string{
+		"GetBalance",
+		"ListOwnedObjects",
+		"GetServiceInfo",
+		"ExecuteTransaction",
+		"ExecuteTransaction",
+	}, methods)
+}
+
+func TestExecuteGaslessStablecoinObjectBalancePaymentSkipsPrepareWhenAddressBalanceIsEnough(t *testing.T) {
+	signer := newTestSigner(t)
+	recipient := "0xabc"
+	var methods []string
+	endpoint, closeServer := newSuiTransactionGRPCTestServer(t, &suiTransactionGRPCTestServer{
+		methods: &methods,
+		getServiceInfo: func(ctx context.Context, req *rpcv2.GetServiceInfoRequest) (*rpcv2.GetServiceInfoResponse, error) {
+			return &rpcv2.GetServiceInfoResponse{Epoch: ptr(uint64(42))}, nil
+		},
+		getBalance: func(ctx context.Context, req *rpcv2.GetBalanceRequest) (*rpcv2.GetBalanceResponse, error) {
+			require.Equal(t, signer.Address(), req.GetOwner())
+			require.Equal(t, TestnetUSDCType, req.GetCoinType())
+			return suiBalanceGRPCResult(TestnetUSDCType, 10000, 400000), nil
+		},
+		listOwnedObjects: func(ctx context.Context, req *rpcv2.ListOwnedObjectsRequest) (*rpcv2.ListOwnedObjectsResponse, error) {
+			t.Fatal("coin object lookup should be skipped when address balance is sufficient")
+			return nil, nil
+		},
+		execute: func(ctx context.Context, req *rpcv2.ExecuteTransactionRequest) (*rpcv2.ExecuteTransactionResponse, error) {
+			return &rpcv2.ExecuteTransactionResponse{
+				Transaction: suiExecutedTransactionGRPCResult("11111111111111111111111111111111", recipient, TestnetUSDCType, "10000"),
+			}, nil
+		},
+	})
+	defer closeServer()
+
+	result, err := ExecuteGaslessStablecoinObjectBalancePayment(context.Background(), GaslessStablecoinObjectBalancePayment{
+		Sender:    signer.Address(),
+		Recipient: recipient,
+		Network:   "sui:testnet",
+		Asset:     "USDC",
+		Amount:    "10000",
+		Endpoints: []string{endpoint},
+	}, signer)
+	require.NoError(t, err)
+	require.Nil(t, result.PrepareTransaction)
+	require.NotNil(t, result.PaymentTransaction)
+	require.Empty(t, result.CoinObjects)
+	require.Equal(t, []string{
+		"GetBalance",
+		"GetServiceInfo",
+		"ExecuteTransaction",
+	}, methods)
+}
+
+func TestExecuteGaslessStablecoinObjectBalancePaymentRejectsInsufficientBalanceBeforePrepareLookup(t *testing.T) {
+	signer := newTestSigner(t)
+	var methods []string
+	endpoint, closeServer := newSuiTransactionGRPCTestServer(t, &suiTransactionGRPCTestServer{
+		methods: &methods,
+		getBalance: func(ctx context.Context, req *rpcv2.GetBalanceRequest) (*rpcv2.GetBalanceResponse, error) {
+			require.Equal(t, signer.Address(), req.GetOwner())
+			require.Equal(t, TestnetUSDCType, req.GetCoinType())
+			return suiBalanceGRPCResult(TestnetUSDCType, 1000, 2000), nil
+		},
+		getServiceInfo: func(ctx context.Context, req *rpcv2.GetServiceInfoRequest) (*rpcv2.GetServiceInfoResponse, error) {
+			t.Fatal("expiration should not be resolved when total balance is insufficient")
+			return nil, nil
+		},
+		listOwnedObjects: func(ctx context.Context, req *rpcv2.ListOwnedObjectsRequest) (*rpcv2.ListOwnedObjectsResponse, error) {
+			t.Fatal("coin objects should not be listed when total balance is insufficient")
+			return nil, nil
+		},
+		execute: func(ctx context.Context, req *rpcv2.ExecuteTransactionRequest) (*rpcv2.ExecuteTransactionResponse, error) {
+			t.Fatal("transaction should not be executed when total balance is insufficient")
+			return nil, nil
+		},
+	})
+	defer closeServer()
+
+	result, err := ExecuteGaslessStablecoinObjectBalancePayment(context.Background(), GaslessStablecoinObjectBalancePayment{
+		Sender:    signer.Address(),
+		Recipient: "0xabc",
+		Network:   "sui:testnet",
+		Asset:     "USDC",
+		Amount:    "10000",
+		Endpoints: []string{endpoint},
+	}, signer)
+	require.Nil(t, result)
+	require.ErrorContains(t, err, "insufficient")
+	require.Equal(t, []string{"GetBalance"}, methods)
 }
 
 func TestBuildGaslessStablecoinTransferTransactionRejectsInvalidInput(t *testing.T) {
@@ -170,72 +317,50 @@ func TestBuildGaslessStablecoinTransferTransactionRejectsInvalidInput(t *testing
 	require.ErrorContains(t, err, "invalid amount")
 }
 
-func TestResolveGaslessStablecoinExpirationUsesRPC(t *testing.T) {
+func TestResolveGaslessStablecoinExpirationUsesGRPC(t *testing.T) {
 	var methods []string
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var rpcReq suiTransactionRPCRequest
-		require.NoError(t, json.NewDecoder(r.Body).Decode(&rpcReq))
-		methods = append(methods, rpcReq.Method)
+	endpoint, closeServer := newSuiTransactionGRPCTestServer(t, &suiTransactionGRPCTestServer{
+		methods: &methods,
+		getServiceInfo: func(ctx context.Context, req *rpcv2.GetServiceInfoRequest) (*rpcv2.GetServiceInfoResponse, error) {
+			return &rpcv2.GetServiceInfoResponse{Epoch: ptr(uint64(42))}, nil
+		},
+	})
+	defer closeServer()
 
-		switch rpcReq.Method {
-		case "suix_getLatestSuiSystemState":
-			require.NoError(t, json.NewEncoder(w).Encode(map[string]interface{}{
-				"jsonrpc": "2.0",
-				"id":      rpcReq.ID,
-				"result": map[string]interface{}{
-					"epoch": "42",
-				},
-			}))
-		default:
-			t.Fatalf("unexpected rpc method %s", rpcReq.Method)
-		}
-	}))
-	defer server.Close()
-
-	expiration, err := ResolveGaslessStablecoinExpiration(context.Background(), "sui:mainnet", []string{"http://127.0.0.1:1", server.URL})
+	expiration, err := ResolveGaslessStablecoinExpiration(context.Background(), "sui:mainnet", []string{"http://127.0.0.1:1", endpoint})
 	require.NoError(t, err)
 	require.NotNil(t, expiration.ValidDuring)
 	require.Equal(t, uint64(42), *expiration.ValidDuring.MinEpoch)
 	require.Equal(t, uint64(43), *expiration.ValidDuring.MaxEpoch)
 	require.Len(t, expiration.ValidDuring.Chain, 32)
-	require.Equal(t, []string{"suix_getLatestSuiSystemState"}, methods)
+	require.Equal(t, []string{"GetServiceInfo"}, methods)
 }
 
 func TestListOwnedGaslessStablecoinCoinObjects(t *testing.T) {
 	var methods []string
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var rpcReq suiTransactionRPCRequest
-		require.NoError(t, json.NewDecoder(r.Body).Decode(&rpcReq))
-		methods = append(methods, rpcReq.Method)
-
-		switch rpcReq.Method {
-		case "suix_getCoins":
-			require.Len(t, rpcReq.Params, 4)
-			require.Equal(t, NormalizeAddress("0x123"), rpcReq.Params[0])
-			require.Equal(t, TestnetUSDCType, rpcReq.Params[1])
-			require.Nil(t, rpcReq.Params[2])
-			require.Equal(t, float64(suiCoinObjectPageLimit), rpcReq.Params[3])
-			require.NoError(t, json.NewEncoder(w).Encode(map[string]interface{}{
-				"jsonrpc": "2.0",
-				"id":      rpcReq.ID,
-				"result": map[string]interface{}{
-					"data": []map[string]interface{}{
-						suiCoinObjectRPCResult("0x1234", "7", "400000", TestnetUSDCType),
-						suiCoinObjectRPCResult("0x5678", "8", "700000", TestnetUSDCType),
-					},
-					"nextCursor":  nil,
-					"hasNextPage": false,
+	endpoint, closeServer := newSuiTransactionGRPCTestServer(t, &suiTransactionGRPCTestServer{
+		methods: &methods,
+		listOwnedObjects: func(ctx context.Context, req *rpcv2.ListOwnedObjectsRequest) (*rpcv2.ListOwnedObjectsResponse, error) {
+			require.Equal(t, NormalizeAddress("0x123"), req.GetOwner())
+			require.Equal(t, coinObjectType(TestnetUSDCType), req.GetObjectType())
+			require.Equal(t, uint32(suiCoinObjectPageLimit), req.GetPageSize())
+			require.Empty(t, req.GetPageToken())
+			requireReadMask(t, req.GetReadMask(), "object_id", "version", "digest", "object_type", "balance")
+			firstObject := suiCoinObjectGRPCResult("0x1234", 7, 400000, TestnetUSDCType)
+			firstObject.PreviousTransaction = ptr("11111111111111111111111111111111")
+			return &rpcv2.ListOwnedObjectsResponse{
+				Objects: []*rpcv2.Object{
+					firstObject,
+					suiCoinObjectGRPCResult("0x5678", 8, 700000, TestnetUSDCType),
 				},
-			}))
-		default:
-			t.Fatalf("unexpected rpc method %s", rpcReq.Method)
-		}
-	}))
-	defer server.Close()
+			}, nil
+		},
+	})
+	defer closeServer()
 
-	coinObjects, err := ListOwnedGaslessStablecoinCoinObjects(context.Background(), "sui:testnet", "0x123", "USDC", []string{server.URL})
+	coinObjects, err := ListOwnedGaslessStablecoinCoinObjects(context.Background(), "sui:testnet", "0x123", "USDC", []string{endpoint})
 	require.NoError(t, err)
-	require.Equal(t, []string{"suix_getCoins"}, methods)
+	require.Equal(t, []string{"ListOwnedObjects"}, methods)
 	require.Len(t, coinObjects, 2)
 	require.Equal(t, NormalizeAddress("0x1234"), coinObjects[0].ObjectRef.ObjectID.String())
 	require.Equal(t, uint64(7), coinObjects[0].ObjectRef.Version)
@@ -250,14 +375,120 @@ func testValidDuringExpiration(t *testing.T) *TransactionExpiration {
 	return expiration
 }
 
-func suiCoinObjectRPCResult(objectID string, version string, balance string, coinType string) map[string]interface{} {
-	return map[string]interface{}{
-		"coinType":     coinType,
-		"coinObjectId": objectID,
-		"version":      version,
-		"digest":       "11111111111111111111111111111111",
-		"balance":      balance,
+func suiCoinObjectGRPCResult(objectID string, version uint64, balance uint64, coinType string) *rpcv2.Object {
+	return &rpcv2.Object{
+		ObjectId:            ptr(objectID),
+		Version:             ptr(version),
+		Digest:              ptr("11111111111111111111111111111111"),
+		ObjectType:          ptr(coinObjectType(coinType)),
+		Balance:             ptr(balance),
+		PreviousTransaction: ptr(""),
 	}
+}
+
+type suiTransactionGRPCTestServer struct {
+	rpcv2.UnimplementedLedgerServiceServer
+	rpcv2.UnimplementedStateServiceServer
+	rpcv2.UnimplementedTransactionExecutionServiceServer
+
+	methods          *[]string
+	getServiceInfo   func(context.Context, *rpcv2.GetServiceInfoRequest) (*rpcv2.GetServiceInfoResponse, error)
+	getBalance       func(context.Context, *rpcv2.GetBalanceRequest) (*rpcv2.GetBalanceResponse, error)
+	listOwnedObjects func(context.Context, *rpcv2.ListOwnedObjectsRequest) (*rpcv2.ListOwnedObjectsResponse, error)
+	execute          func(context.Context, *rpcv2.ExecuteTransactionRequest) (*rpcv2.ExecuteTransactionResponse, error)
+}
+
+func newSuiTransactionGRPCTestServer(t *testing.T, handler *suiTransactionGRPCTestServer) (string, func()) {
+	t.Helper()
+	if handler == nil {
+		handler = &suiTransactionGRPCTestServer{}
+	}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	server := grpc.NewServer()
+	rpcv2.RegisterLedgerServiceServer(server, handler)
+	rpcv2.RegisterStateServiceServer(server, handler)
+	rpcv2.RegisterTransactionExecutionServiceServer(server, handler)
+	go func() {
+		_ = server.Serve(listener)
+	}()
+	return "http://" + listener.Addr().String(), func() {
+		server.Stop()
+		_ = listener.Close()
+	}
+}
+
+func (s *suiTransactionGRPCTestServer) GetServiceInfo(ctx context.Context, req *rpcv2.GetServiceInfoRequest) (*rpcv2.GetServiceInfoResponse, error) {
+	s.appendMethod("GetServiceInfo")
+	if s.getServiceInfo == nil {
+		return nil, status.Error(codes.Unimplemented, "get service info not implemented")
+	}
+	return s.getServiceInfo(ctx, req)
+}
+
+func (s *suiTransactionGRPCTestServer) ListOwnedObjects(ctx context.Context, req *rpcv2.ListOwnedObjectsRequest) (*rpcv2.ListOwnedObjectsResponse, error) {
+	s.appendMethod("ListOwnedObjects")
+	if s.listOwnedObjects == nil {
+		return nil, status.Error(codes.Unimplemented, "list owned objects not implemented")
+	}
+	return s.listOwnedObjects(ctx, req)
+}
+
+func (s *suiTransactionGRPCTestServer) GetBalance(ctx context.Context, req *rpcv2.GetBalanceRequest) (*rpcv2.GetBalanceResponse, error) {
+	s.appendMethod("GetBalance")
+	if s.getBalance == nil {
+		return nil, status.Error(codes.Unimplemented, "get balance not implemented")
+	}
+	return s.getBalance(ctx, req)
+}
+
+func (s *suiTransactionGRPCTestServer) ExecuteTransaction(ctx context.Context, req *rpcv2.ExecuteTransactionRequest) (*rpcv2.ExecuteTransactionResponse, error) {
+	s.appendMethod("ExecuteTransaction")
+	if s.execute == nil {
+		return nil, status.Error(codes.Unimplemented, "execute not implemented")
+	}
+	return s.execute(ctx, req)
+}
+
+func (s *suiTransactionGRPCTestServer) appendMethod(method string) {
+	if s.methods != nil {
+		*s.methods = append(*s.methods, method)
+	}
+}
+
+func suiExecutedTransactionGRPCResult(digest string, address string, coinType string, amount string) *rpcv2.ExecutedTransaction {
+	success := true
+	transaction := &rpcv2.ExecutedTransaction{
+		Digest: ptr(digest),
+		Effects: &rpcv2.TransactionEffects{
+			Status: &rpcv2.ExecutionStatus{Success: &success},
+		},
+	}
+	if amount != "" {
+		transaction.BalanceChanges = []*rpcv2.BalanceChange{{
+			Address:  ptr(address),
+			CoinType: ptr(coinType),
+			Amount:   ptr(amount),
+		}}
+	}
+	return transaction
+}
+
+func suiBalanceGRPCResult(coinType string, addressBalance uint64, coinBalance uint64) *rpcv2.GetBalanceResponse {
+	return &rpcv2.GetBalanceResponse{
+		Balance: &rpcv2.Balance{
+			CoinType:       ptr(coinType),
+			Balance:        ptr(addressBalance + coinBalance),
+			AddressBalance: ptr(addressBalance),
+			CoinBalance:    ptr(coinBalance),
+		},
+	}
+}
+
+func requireReadMask(t *testing.T, mask *fieldmaskpb.FieldMask, paths ...string) {
+	t.Helper()
+	require.NotNil(t, mask)
+	require.Equal(t, paths, mask.GetPaths())
 }
 
 func TestBuildGaslessStablecoinTransferTransactionUsesFundsWithdrawal(t *testing.T) {

@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/btcsuite/btcutil/base58"
+	rpcv2 "github.com/gosuda/x402-facilitator/scheme/sui/grpc/pb/sui/rpc/v2"
 	bcs "github.com/iotaledger/bcs-go"
 	"golang.org/x/crypto/blake2b"
 )
@@ -495,6 +496,426 @@ func ParseExecuteTransactionBlock(data []byte) (*ExecuteTransactionBlock, error)
 	return &executed, nil
 }
 
+func dryRunTransactionBlockFromGRPC(txBytes []byte, response *rpcv2.SimulateTransactionResponse) (*DryRunTransactionBlock, error) {
+	input, err := transactionBlockDataFromBytes(txBytes)
+	if err != nil {
+		return nil, err
+	}
+	transaction := response.GetTransaction()
+	return &DryRunTransactionBlock{
+		Input:          *input,
+		Effects:        transactionEffectsFromGRPC(transaction.GetEffects()),
+		BalanceChanges: balanceChangesFromGRPC(transaction.GetBalanceChanges()),
+	}, nil
+}
+
+func executeTransactionBlockFromGRPC(transaction *rpcv2.ExecutedTransaction) (*ExecuteTransactionBlock, error) {
+	if transaction == nil {
+		return nil, errors.New("missing Sui transaction")
+	}
+	var digest Digest
+	if rawDigest := strings.TrimSpace(transaction.GetDigest()); rawDigest != "" {
+		parsed, err := ParseDigest(rawDigest)
+		if err != nil {
+			return nil, err
+		}
+		digest = parsed
+	}
+	var checkpoint *string
+	if transaction.Checkpoint != nil {
+		value := strconv.FormatUint(transaction.GetCheckpoint(), 10)
+		checkpoint = &value
+	}
+	var timestampMs *string
+	if timestamp := transaction.GetTimestamp(); timestamp != nil {
+		value := strconv.FormatInt(timestamp.AsTime().UnixMilli(), 10)
+		timestampMs = &value
+	}
+	effects := transactionEffectsFromGRPC(transaction.GetEffects())
+	return &ExecuteTransactionBlock{
+		Digest:         digest,
+		Effects:        &effects,
+		BalanceChanges: balanceChangesFromGRPC(transaction.GetBalanceChanges()),
+		TimestampMs:    timestampMs,
+		Checkpoint:     checkpoint,
+	}, nil
+}
+
+func transactionEffectsFromGRPC(effects *rpcv2.TransactionEffects) TransactionEffects {
+	result := TransactionEffects{}
+	if effects == nil {
+		return result
+	}
+	if status := effects.GetStatus(); status != nil {
+		result.Status = &TransactionExecutionStatus{Status: "failure"}
+		if status.GetSuccess() {
+			result.Status.Status = "success"
+		}
+		if err := status.GetError(); err != nil {
+			description := strings.TrimSpace(err.GetDescription())
+			if description == "" {
+				description = err.String()
+			}
+			result.Status.Error = &description
+		}
+	}
+	if effects.Epoch != nil {
+		result.ExecutedEpoch = strconv.FormatUint(effects.GetEpoch(), 10)
+	}
+	if gasUsed := effects.GetGasUsed(); gasUsed != nil {
+		result.GasUsed = &GasUsedResult{
+			ComputationCost:         strconv.FormatUint(gasUsed.GetComputationCost(), 10),
+			StorageCost:             strconv.FormatUint(gasUsed.GetStorageCost(), 10),
+			StorageRebate:           strconv.FormatUint(gasUsed.GetStorageRebate(), 10),
+			NonRefundableStorageFee: strconv.FormatUint(gasUsed.GetNonRefundableStorageFee(), 10),
+		}
+	}
+	if digest := strings.TrimSpace(effects.GetTransactionDigest()); digest != "" {
+		if parsed, err := ParseDigest(digest); err == nil {
+			result.TransactionDigest = parsed
+		}
+	}
+	for _, dependency := range effects.GetDependencies() {
+		if parsed, err := ParseDigest(dependency); err == nil {
+			result.Dependencies = append(result.Dependencies, parsed)
+		}
+	}
+	for _, changed := range effects.GetChangedObjects() {
+		applyChangedObject(&result, changed)
+	}
+	if gasObject := changedObjectOwnerResult(effects.GetGasObject()); gasObject != nil {
+		result.GasObject = gasObject
+	}
+	return result
+}
+
+func applyChangedObject(result *TransactionEffects, changed *rpcv2.ChangedObject) {
+	if result == nil || changed == nil {
+		return
+	}
+	switch changed.GetOutputState() {
+	case rpcv2.ChangedObject_OUTPUT_OBJECT_STATE_DOES_NOT_EXIST:
+		if ref := changedInputRef(changed); ref != nil {
+			result.Deleted = append(result.Deleted, *ref)
+		}
+	case rpcv2.ChangedObject_OUTPUT_OBJECT_STATE_OBJECT_WRITE, rpcv2.ChangedObject_OUTPUT_OBJECT_STATE_PACKAGE_WRITE:
+		owner := changedObjectOwnerResult(changed)
+		if owner == nil {
+			return
+		}
+		if changed.GetIdOperation() == rpcv2.ChangedObject_CREATED ||
+			changed.GetInputState() == rpcv2.ChangedObject_INPUT_OBJECT_STATE_DOES_NOT_EXIST {
+			result.Created = append(result.Created, *owner)
+			return
+		}
+		result.Mutated = append(result.Mutated, *owner)
+	}
+}
+
+func changedObjectOwnerResult(changed *rpcv2.ChangedObject) *ObjectOwnerResult {
+	if changed == nil {
+		return nil
+	}
+	ref := changedOutputRef(changed)
+	if ref == nil {
+		ref = changedInputRef(changed)
+	}
+	if ref == nil {
+		return nil
+	}
+	return &ObjectOwnerResult{
+		Owner:     ownerFromGRPC(changed.GetOutputOwner()),
+		Reference: ref,
+	}
+}
+
+func changedOutputRef(changed *rpcv2.ChangedObject) *ObjectRefResult {
+	if changed == nil || strings.TrimSpace(changed.GetObjectId()) == "" || strings.TrimSpace(changed.GetOutputDigest()) == "" {
+		return nil
+	}
+	return objectRefResult(changed.GetObjectId(), changed.GetOutputVersion(), changed.GetOutputDigest())
+}
+
+func changedInputRef(changed *rpcv2.ChangedObject) *ObjectRefResult {
+	if changed == nil || strings.TrimSpace(changed.GetObjectId()) == "" || strings.TrimSpace(changed.GetInputDigest()) == "" {
+		return nil
+	}
+	return objectRefResult(changed.GetObjectId(), changed.GetInputVersion(), changed.GetInputDigest())
+}
+
+func objectRefResult(objectID string, version uint64, digest string) *ObjectRefResult {
+	parsedObjectID, err := ParseAddress(objectID)
+	if err != nil {
+		return nil
+	}
+	parsedDigest, err := ParseDigest(digest)
+	if err != nil {
+		return nil
+	}
+	return &ObjectRefResult{
+		ObjectID: parsedObjectID,
+		Version:  ObjectVersion(strconv.FormatUint(version, 10)),
+		Digest:   parsedDigest,
+	}
+}
+
+func balanceChangesFromGRPC(changes []*rpcv2.BalanceChange) []BalanceChange {
+	result := make([]BalanceChange, 0, len(changes))
+	for _, change := range changes {
+		if change == nil {
+			continue
+		}
+		result = append(result, BalanceChange{
+			Owner:    map[string]interface{}{"AddressOwner": change.GetAddress()},
+			CoinType: change.GetCoinType(),
+			Amount:   change.GetAmount(),
+		})
+	}
+	return result
+}
+
+func ownedCoinObjectFromGRPC(object *rpcv2.Object, expectedCoinType string) (OwnedCoinObject, error) {
+	if object == nil {
+		return OwnedCoinObject{}, errors.New("nil object")
+	}
+	if objectType := strings.TrimSpace(object.GetObjectType()); objectType != "" {
+		if NormalizeType(objectType) != NormalizeType(coinObjectType(expectedCoinType)) {
+			return OwnedCoinObject{}, fmt.Errorf("coin object type %q does not match %q", objectType, expectedCoinType)
+		}
+	}
+	objectID, err := ParseAddress(object.GetObjectId())
+	if err != nil {
+		return OwnedCoinObject{}, err
+	}
+	digest, err := ParseDigest(object.GetDigest())
+	if err != nil {
+		return OwnedCoinObject{}, err
+	}
+	return OwnedCoinObject{
+		ObjectRef: ObjectRef{
+			ObjectID: objectID,
+			Version:  object.GetVersion(),
+			Digest:   digest,
+		},
+		CoinType:            expectedCoinType,
+		Balance:             object.GetBalance(),
+		PreviousTransaction: strings.TrimSpace(object.GetPreviousTransaction()),
+	}, nil
+}
+
+func transactionBlockDataFromBytes(txBytes []byte) (*TransactionBlockData, error) {
+	txData, err := bcs.Unmarshal[gaslessStablecoinTransactionData](txBytes)
+	if err != nil {
+		return nil, fmt.Errorf("invalid transaction data: %w", err)
+	}
+	if txData.V1 == nil {
+		return nil, errors.New("transaction missing V1 data")
+	}
+	return transactionBlockDataFromV1(txData.V1), nil
+}
+
+func transactionBlockDataFromGRPC(transaction *rpcv2.Transaction) *TransactionBlockData {
+	if transaction == nil {
+		return nil
+	}
+	if bcsData := transaction.GetBcs(); bcsData != nil && len(bcsData.GetValue()) > 0 {
+		if data, err := transactionBlockDataFromBytes(bcsData.GetValue()); err == nil {
+			return data
+		}
+	}
+	sender := strings.TrimSpace(transaction.GetSender())
+	var parsedSender *Address
+	if sender != "" {
+		if address, err := ParseAddress(sender); err == nil {
+			parsedSender = &address
+		}
+	}
+	return &TransactionBlockData{
+		MessageVersion: "v1",
+		Sender:         parsedSender,
+		Transaction:    transactionKindFromGRPC(transaction.GetKind()),
+		GasData:        gasDataFromGRPC(transaction.GetGasPayment()),
+	}
+}
+
+func transactionBlockDataFromV1(v1 *gaslessStablecoinTransactionDataV1) *TransactionBlockData {
+	sender := v1.Sender
+	return &TransactionBlockData{
+		MessageVersion: "v1",
+		Sender:         &sender,
+		Transaction:    transactionKindFromProgrammable(v1.Kind.ProgrammableTransaction),
+		GasData:        gasDataFromBCS(v1.GasData),
+	}
+}
+
+func transactionKindFromProgrammable(programmable *gaslessStablecoinProgrammableTransaction) *TransactionKind {
+	if programmable == nil {
+		return &TransactionKind{}
+	}
+	commands := make([]json.RawMessage, 0, len(programmable.Commands))
+	for _, command := range programmable.Commands {
+		commands = append(commands, commandRawMessage(command))
+	}
+	return &TransactionKind{
+		Kind:     TransactionKindProgrammable,
+		Commands: commands,
+	}
+}
+
+func transactionKindFromGRPC(kind *rpcv2.TransactionKind) *TransactionKind {
+	if kind == nil {
+		return nil
+	}
+	programmable := kind.GetProgrammableTransaction()
+	if programmable == nil {
+		return &TransactionKind{Kind: kind.GetKind().String()}
+	}
+	commands := make([]json.RawMessage, 0, len(programmable.GetCommands()))
+	for _, command := range programmable.GetCommands() {
+		commands = append(commands, commandRawMessageFromGRPC(command))
+	}
+	return &TransactionKind{
+		Kind:     TransactionKindProgrammable,
+		Commands: commands,
+	}
+}
+
+func commandRawMessage(command Command) json.RawMessage {
+	var value map[string]interface{}
+	switch {
+	case command.MoveCall != nil:
+		typeArguments := make([]string, 0, len(command.MoveCall.TypeArguments))
+		for _, typeArgument := range command.MoveCall.TypeArguments {
+			typeArguments = append(typeArguments, typeArgument.String())
+		}
+		value = map[string]interface{}{
+			CommandKindMoveCall: map[string]interface{}{
+				"package":        command.MoveCall.Package.String(),
+				"module":         command.MoveCall.Module,
+				"function":       command.MoveCall.Function,
+				"type_arguments": typeArguments,
+				"arguments":      command.MoveCall.Arguments,
+			},
+		}
+	case command.TransferObjects != nil:
+		value = map[string]interface{}{CommandKindTransferObjects: command.TransferObjects}
+	case command.SplitCoins != nil:
+		value = map[string]interface{}{CommandKindSplitCoins: command.SplitCoins}
+	case command.MergeCoins != nil:
+		value = map[string]interface{}{CommandKindMergeCoins: command.MergeCoins}
+	case command.Publish != nil:
+		value = map[string]interface{}{CommandKindPublish: command.Publish}
+	case command.MakeMoveVec != nil:
+		value = map[string]interface{}{CommandKindMakeMoveVec: command.MakeMoveVec}
+	case command.Upgrade != nil:
+		value = map[string]interface{}{CommandKindUpgrade: command.Upgrade}
+	default:
+		value = map[string]interface{}{"Unknown": map[string]interface{}{}}
+	}
+	raw, _ := json.Marshal(value)
+	return raw
+}
+
+func commandRawMessageFromGRPC(command *rpcv2.Command) json.RawMessage {
+	var value map[string]interface{}
+	switch {
+	case command.GetMoveCall() != nil:
+		moveCall := command.GetMoveCall()
+		value = map[string]interface{}{
+			CommandKindMoveCall: map[string]interface{}{
+				"package":        moveCall.GetPackage(),
+				"module":         moveCall.GetModule(),
+				"function":       moveCall.GetFunction(),
+				"type_arguments": moveCall.GetTypeArguments(),
+			},
+		}
+	case command.GetTransferObjects() != nil:
+		value = map[string]interface{}{CommandKindTransferObjects: map[string]interface{}{}}
+	case command.GetSplitCoins() != nil:
+		value = map[string]interface{}{CommandKindSplitCoins: map[string]interface{}{}}
+	case command.GetMergeCoins() != nil:
+		value = map[string]interface{}{CommandKindMergeCoins: map[string]interface{}{}}
+	case command.GetPublish() != nil:
+		value = map[string]interface{}{CommandKindPublish: map[string]interface{}{}}
+	case command.GetMakeMoveVector() != nil:
+		value = map[string]interface{}{CommandKindMakeMoveVec: map[string]interface{}{}}
+	case command.GetUpgrade() != nil:
+		value = map[string]interface{}{CommandKindUpgrade: map[string]interface{}{}}
+	default:
+		value = map[string]interface{}{"Unknown": map[string]interface{}{}}
+	}
+	raw, _ := json.Marshal(value)
+	return raw
+}
+
+func gasDataFromBCS(data gaslessStablecoinGasData) *GasData {
+	payment := make([]ObjectRefResult, 0, len(data.Payment))
+	for _, ref := range data.Payment {
+		payment = append(payment, ObjectRefResult{
+			ObjectID: ref.ObjectID,
+			Version:  ObjectVersion(strconv.FormatUint(ref.Version, 10)),
+			Digest:   ref.Digest,
+		})
+	}
+	owner := data.Owner
+	return &GasData{
+		Payment: payment,
+		Owner:   &owner,
+		Price:   strconv.FormatUint(data.Price, 10),
+		Budget:  strconv.FormatUint(data.Budget, 10),
+	}
+}
+
+func gasDataFromGRPC(data *rpcv2.GasPayment) *GasData {
+	if data == nil {
+		return nil
+	}
+	payment := make([]ObjectRefResult, 0, len(data.GetObjects()))
+	for _, ref := range data.GetObjects() {
+		if converted := objectRefResult(ref.GetObjectId(), ref.GetVersion(), ref.GetDigest()); converted != nil {
+			payment = append(payment, *converted)
+		}
+	}
+	var owner *Address
+	if rawOwner := strings.TrimSpace(data.GetOwner()); rawOwner != "" {
+		if parsed, err := ParseAddress(rawOwner); err == nil {
+			owner = &parsed
+		}
+	}
+	return &GasData{
+		Payment: payment,
+		Owner:   owner,
+		Price:   strconv.FormatUint(data.GetPrice(), 10),
+		Budget:  strconv.FormatUint(data.GetBudget(), 10),
+	}
+}
+
+func ownerFromGRPC(owner *rpcv2.Owner) interface{} {
+	if owner == nil {
+		return nil
+	}
+	switch owner.GetKind() {
+	case rpcv2.Owner_ADDRESS:
+		return map[string]interface{}{"AddressOwner": owner.GetAddress()}
+	case rpcv2.Owner_OBJECT:
+		return map[string]interface{}{"ObjectOwner": owner.GetAddress()}
+	case rpcv2.Owner_SHARED:
+		return map[string]interface{}{"Shared": map[string]interface{}{"initial_shared_version": strconv.FormatUint(owner.GetVersion(), 10)}}
+	case rpcv2.Owner_IMMUTABLE:
+		return "Immutable"
+	default:
+		return owner.GetAddress()
+	}
+}
+
+func coinObjectType(coinType string) string {
+	return fmt.Sprintf("%s<%s>", NormalizeType("0x2::coin::Coin"), NormalizeType(coinType))
+}
+
+func ptr[T any](value T) *T {
+	return &value
+}
+
 func TransactionResultStatusError(result *ExecuteTransactionBlock, fallback string) string {
 	if result == nil {
 		return fallback
@@ -671,94 +1092,6 @@ func parseDigest(value string) (Digest, error) {
 	}
 
 	return nil, fmt.Errorf("digest must be a 32-byte base58 or hex value: %s", value)
-}
-
-type suiTransactionRPCRequest struct {
-	JSONRPC string        `json:"jsonrpc"`
-	ID      int           `json:"id"`
-	Method  string        `json:"method"`
-	Params  []interface{} `json:"params"`
-}
-
-type suiTransactionRPCResponse struct {
-	JSONRPC string                  `json:"jsonrpc"`
-	ID      int                     `json:"id"`
-	Result  json.RawMessage         `json:"result"`
-	Error   *suiTransactionRPCError `json:"error,omitempty"`
-}
-
-type suiTransactionRPCError struct {
-	Code    int             `json:"code"`
-	Message string          `json:"message"`
-	Data    json.RawMessage `json:"data,omitempty"`
-}
-
-type suiCoinObjectPage struct {
-	Data        []suiCoinObjectResult `json:"data"`
-	NextCursor  *string               `json:"nextCursor"`
-	HasNextPage bool                  `json:"hasNextPage"`
-}
-
-type suiCoinObjectResult struct {
-	CoinType            string `json:"coinType"`
-	CoinObjectID        string `json:"coinObjectId"`
-	ObjectID            string `json:"objectId,omitempty"`
-	Version             string `json:"version"`
-	Digest              string `json:"digest"`
-	Balance             string `json:"balance"`
-	PreviousTransaction string `json:"previousTransaction,omitempty"`
-}
-
-type suiTransactionBlockResult struct {
-	Transaction *suiTransactionBlock `json:"transaction,omitempty"`
-}
-
-type suiTransactionBlock struct {
-	Data TransactionBlockData `json:"data"`
-}
-
-func (r suiCoinObjectResult) ownedCoinObject() (OwnedCoinObject, error) {
-	objectID := strings.TrimSpace(r.CoinObjectID)
-	if objectID == "" {
-		objectID = strings.TrimSpace(r.ObjectID)
-	}
-	parsedObjectID, err := ParseAddress(objectID)
-	if err != nil {
-		return OwnedCoinObject{}, err
-	}
-	version, err := strconv.ParseUint(strings.TrimSpace(r.Version), 10, 64)
-	if err != nil {
-		return OwnedCoinObject{}, fmt.Errorf("invalid version %q: %w", r.Version, err)
-	}
-	digest, err := ParseDigest(r.Digest)
-	if err != nil {
-		return OwnedCoinObject{}, err
-	}
-	balance, err := strconv.ParseUint(strings.TrimSpace(r.Balance), 10, 64)
-	if err != nil {
-		return OwnedCoinObject{}, fmt.Errorf("invalid balance %q: %w", r.Balance, err)
-	}
-
-	return OwnedCoinObject{
-		ObjectRef: ObjectRef{
-			ObjectID: parsedObjectID,
-			Version:  version,
-			Digest:   digest,
-		},
-		CoinType:            r.CoinType,
-		Balance:             balance,
-		PreviousTransaction: strings.TrimSpace(r.PreviousTransaction),
-	}, nil
-}
-
-func (e *suiTransactionRPCError) Error() string {
-	if e == nil {
-		return ""
-	}
-	if len(e.Data) == 0 {
-		return fmt.Sprintf("sui rpc error %d: %s", e.Code, e.Message)
-	}
-	return fmt.Sprintf("sui rpc error %d: %s: %s", e.Code, e.Message, string(e.Data))
 }
 
 type TypeTag struct {
