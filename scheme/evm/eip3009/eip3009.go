@@ -31,7 +31,7 @@ var (
 
 // Eip3009MetaData contains all meta data concerning the Eip3009 contract.
 var Eip3009MetaData = &bind.MetaData{
-	ABI: "[{\"name\":\"transferWithAuthorization\",\"type\":\"function\",\"inputs\":[{\"name\":\"from\",\"type\":\"address\"},{\"name\":\"to\",\"type\":\"address\"},{\"name\":\"value\",\"type\":\"uint256\"},{\"name\":\"validAfter\",\"type\":\"uint256\"},{\"name\":\"validBefore\",\"type\":\"uint256\"},{\"name\":\"nonce\",\"type\":\"bytes32\"},{\"name\":\"signature\",\"type\":\"bytes\"}],\"outputs\":[],\"stateMutability\":\"nonpayable\"},{\"name\":\"balanceOf\",\"type\":\"function\",\"inputs\":[{\"name\":\"account\",\"type\":\"address\"}],\"outputs\":[{\"name\":\"balance\",\"type\":\"uint256\"}],\"stateMutability\":\"view\"}]",
+	ABI: "[{\"name\":\"transferWithAuthorization\",\"type\":\"function\",\"inputs\":[{\"name\":\"from\",\"type\":\"address\"},{\"name\":\"to\",\"type\":\"address\"},{\"name\":\"value\",\"type\":\"uint256\"},{\"name\":\"validAfter\",\"type\":\"uint256\"},{\"name\":\"validBefore\",\"type\":\"uint256\"},{\"name\":\"nonce\",\"type\":\"bytes32\"},{\"name\":\"signature\",\"type\":\"bytes\"}],\"outputs\":[],\"stateMutability\":\"nonpayable\"},{\"name\":\"balanceOf\",\"type\":\"function\",\"inputs\":[{\"name\":\"account\",\"type\":\"address\"}],\"outputs\":[{\"name\":\"balance\",\"type\":\"uint256\"}],\"stateMutability\":\"view\"},{\"name\":\"authorizationState\",\"type\":\"function\",\"inputs\":[{\"name\":\"authorizer\",\"type\":\"address\"},{\"name\":\"nonce\",\"type\":\"bytes32\"}],\"outputs\":[{\"name\":\"used\",\"type\":\"bool\"}],\"stateMutability\":\"view\"}]",
 }
 
 // Eip3009ABI is the input ABI used to generate the binding from.
@@ -209,6 +209,37 @@ func (_Eip3009 *Eip3009Session) BalanceOf(account common.Address) (*big.Int, err
 // Solidity: function balanceOf(address account) view returns(uint256 balance)
 func (_Eip3009 *Eip3009CallerSession) BalanceOf(account common.Address) (*big.Int, error) {
 	return _Eip3009.Contract.BalanceOf(&_Eip3009.CallOpts, account)
+}
+
+// AuthorizationState is a free data retrieval call binding the contract method 0xe94a0102.
+//
+// Solidity: function authorizationState(address authorizer, bytes32 nonce) view returns(bool used)
+func (_Eip3009 *Eip3009Caller) AuthorizationState(opts *bind.CallOpts, authorizer common.Address, nonce [32]byte) (bool, error) {
+	var out []interface{}
+	err := _Eip3009.contract.Call(opts, &out, "authorizationState", authorizer, nonce)
+
+	if err != nil {
+		return *new(bool), err
+	}
+
+	out0 := *abi.ConvertType(out[0], new(bool)).(*bool)
+
+	return out0, err
+
+}
+
+// AuthorizationState is a free data retrieval call binding the contract method 0xe94a0102.
+//
+// Solidity: function authorizationState(address authorizer, bytes32 nonce) view returns(bool used)
+func (_Eip3009 *Eip3009Session) AuthorizationState(authorizer common.Address, nonce [32]byte) (bool, error) {
+	return _Eip3009.Contract.AuthorizationState(&_Eip3009.CallOpts, authorizer, nonce)
+}
+
+// AuthorizationState is a free data retrieval call binding the contract method 0xe94a0102.
+//
+// Solidity: function authorizationState(address authorizer, bytes32 nonce) view returns(bool used)
+func (_Eip3009 *Eip3009CallerSession) AuthorizationState(authorizer common.Address, nonce [32]byte) (bool, error) {
+	return _Eip3009.Contract.AuthorizationState(&_Eip3009.CallOpts, authorizer, nonce)
 }
 
 // TransferWithAuthorization is a paid mutator transaction binding the contract method 0xcf092995.
