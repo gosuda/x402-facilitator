@@ -321,6 +321,7 @@ func ExecuteGaslessStablecoinObjectBalancePayment(ctx context.Context, payment G
 	if err != nil {
 		return nil, err
 	}
+	defer client.Close()
 
 	balance, err := client.Balance(ctx, sender, coinType)
 	if err != nil {
@@ -440,6 +441,7 @@ func ResolveGaslessStablecoinExpiration(ctx context.Context, network string, end
 	if err != nil {
 		return nil, err
 	}
+	defer client.Close()
 	return client.ResolveGaslessStablecoinExpiration(ctx, info.ChainDigest)
 }
 
@@ -464,6 +466,7 @@ func ListOwnedGaslessStablecoinCoinObjects(ctx context.Context, network string, 
 	if err != nil {
 		return nil, err
 	}
+	defer client.Close()
 	return client.ListOwnedCoinObjects(ctx, owner, coinType)
 }
 
@@ -488,6 +491,7 @@ func ExecuteSignedTransactionBlock(ctx context.Context, network string, endpoint
 	if err != nil {
 		return nil, err
 	}
+	defer client.Close()
 	return client.ExecuteTransactionBlock(ctx, payload.Transaction, []string{payload.Signature})
 }
 

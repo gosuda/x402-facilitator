@@ -242,6 +242,9 @@ func (c *Client) call(ctx context.Context, action func(context.Context, string) 
 	if c == nil {
 		return errors.New("nil Sui client")
 	}
+	if c.grpc == nil {
+		return errors.New("Sui gRPC client is not initialized")
+	}
 	if ctx == nil {
 		ctx = context.Background()
 	}

@@ -282,6 +282,17 @@ func normalizeEndpoint(endpoint string) (string, bool, error) {
 		return "", false, errors.New("empty Sui gRPC endpoint")
 	}
 
+	for _, schemePrefix := range []string{"dns:///", "passthrough:///"} {
+		if strings.HasPrefix(endpoint, schemePrefix) {
+			host := strings.TrimSpace(strings.TrimPrefix(endpoint, schemePrefix))
+			if host == "" {
+				return "", false, errors.New("empty Sui gRPC endpoint target")
+			}
+			host = hostWithDefaultPort(host, "443")
+			return schemePrefix + host, !isLocalhost(host), nil
+		}
+	}
+
 	if strings.Contains(endpoint, "://") {
 		parsed, err := url.Parse(endpoint)
 		if err != nil {
@@ -302,9 +313,6 @@ func normalizeEndpoint(endpoint string) (string, bool, error) {
 	}
 
 	host := endpoint
-	if strings.HasPrefix(endpoint, "dns:///") || strings.HasPrefix(endpoint, "passthrough:///") {
-		host = strings.TrimPrefix(strings.TrimPrefix(endpoint, "dns:///"), "passthrough:///")
-	}
 	if _, _, err := net.SplitHostPort(host); err != nil {
 		host = net.JoinHostPort(host, "443")
 	}

@@ -62,6 +62,13 @@ func NewSuiFacilitatorWithOptions(network string, url string, privateKeyHex stri
 	}, nil
 }
 
+func (t *SuiFacilitator) Close() error {
+	if t == nil || t.client == nil {
+		return nil
+	}
+	return t.client.Close()
+}
+
 func gaslessStablecoinAllowlist(assets []string) ([]string, map[string]struct{}) {
 	allowlist := make(map[string]struct{}, len(assets))
 	ordered := make([]string, 0, len(assets))

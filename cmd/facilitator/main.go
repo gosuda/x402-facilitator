@@ -45,12 +45,12 @@ func run() {
 	}
 	log.Logger = zerolog.New(os.Stdout).With().Timestamp().Caller().Logger()
 
-	facilitator, err := facilitator.NewFacilitator(config.Scheme, config.Network, config.Url, config.PrivateKey)
+	paymentFacilitator, err := facilitator.NewFacilitator(config.Scheme, config.Network, config.Url, config.PrivateKey)
 	if err != nil {
 		log.Fatal().Err(err).Msg("Failed to init facilitator, shutting down...")
 	}
 
-	api := api.NewServer(facilitator)
+	api := api.NewServer(paymentFacilitator)
 
 	// Initialize Server
 	server := &http.Server{
@@ -76,6 +76,11 @@ func run() {
 
 	if err := server.Shutdown(ctx); err != nil {
 		log.Fatal().Err(err).Msg("Failed to shutdown server gracefully")
+	}
+	if closer, ok := paymentFacilitator.(interface{ Close() error }); ok {
+		if err := closer.Close(); err != nil {
+			log.Error().Err(err).Msg("Failed to close facilitator")
+		}
 	}
 	log.Info().Msg("Server shutdown gracefully")
 }
