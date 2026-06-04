@@ -307,9 +307,10 @@ type GaslessStablecoinTransfer struct {
 }
 
 type OwnedCoinObject struct {
-	ObjectRef ObjectRef `json:"objectRef"`
-	CoinType  string    `json:"coinType,omitempty"`
-	Balance   uint64    `json:"balance"`
+	ObjectRef           ObjectRef `json:"objectRef"`
+	CoinType            string    `json:"coinType,omitempty"`
+	Balance             uint64    `json:"balance"`
+	PreviousTransaction string    `json:"previousTransaction,omitempty"`
 }
 
 // CoinObjectsToAddressBalanceTransfer builds a PTB that deposits token balance
@@ -699,12 +700,21 @@ type suiCoinObjectPage struct {
 }
 
 type suiCoinObjectResult struct {
-	CoinType     string `json:"coinType"`
-	CoinObjectID string `json:"coinObjectId"`
-	ObjectID     string `json:"objectId,omitempty"`
-	Version      string `json:"version"`
-	Digest       string `json:"digest"`
-	Balance      string `json:"balance"`
+	CoinType            string `json:"coinType"`
+	CoinObjectID        string `json:"coinObjectId"`
+	ObjectID            string `json:"objectId,omitempty"`
+	Version             string `json:"version"`
+	Digest              string `json:"digest"`
+	Balance             string `json:"balance"`
+	PreviousTransaction string `json:"previousTransaction,omitempty"`
+}
+
+type suiTransactionBlockResult struct {
+	Transaction *suiTransactionBlock `json:"transaction,omitempty"`
+}
+
+type suiTransactionBlock struct {
+	Data TransactionBlockData `json:"data"`
 }
 
 func (r suiCoinObjectResult) ownedCoinObject() (OwnedCoinObject, error) {
@@ -735,8 +745,9 @@ func (r suiCoinObjectResult) ownedCoinObject() (OwnedCoinObject, error) {
 			Version:  version,
 			Digest:   digest,
 		},
-		CoinType: r.CoinType,
-		Balance:  balance,
+		CoinType:            r.CoinType,
+		Balance:             balance,
+		PreviousTransaction: strings.TrimSpace(r.PreviousTransaction),
 	}, nil
 }
 

@@ -313,7 +313,22 @@ func ExecuteGaslessStablecoinObjectBalancePayment(ctx context.Context, payment G
 		return nil, fmt.Errorf("invalid amount: %s", payment.Amount)
 	}
 
-	coinObjects, err := ListOwnedGaslessStablecoinCoinObjects(ctx, payment.Network, sender, payment.Asset, payment.Endpoints)
+	coinType, err := resolveGaslessStablecoinAsset(payment.Network, payment.Asset)
+	if err != nil {
+		return nil, err
+	}
+
+	result := &GaslessStablecoinObjectBalancePaymentResult{
+		PaymentAmount:  strconv.FormatUint(paymentAmount, 10),
+		PreparedAmount: "0",
+	}
+
+	client, err := newSuiTransactionRPCClient(payment.Network, payment.Endpoints)
+	if err != nil {
+		return nil, err
+	}
+
+	coinObjects, err := client.listOwnedCoinObjects(ctx, sender, coinType)
 	if err != nil {
 		return nil, err
 	}
@@ -324,12 +339,7 @@ func ExecuteGaslessStablecoinObjectBalancePayment(ctx context.Context, payment G
 		}
 		nonZeroCoinObjects = append(nonZeroCoinObjects, coinObject)
 	}
-
-	result := &GaslessStablecoinObjectBalancePaymentResult{
-		CoinObjects:    nonZeroCoinObjects,
-		PaymentAmount:  strconv.FormatUint(paymentAmount, 10),
-		PreparedAmount: "0",
-	}
+	result.CoinObjects = nonZeroCoinObjects
 
 	var prepareAmount uint64
 	for _, coinObject := range nonZeroCoinObjects {
@@ -356,7 +366,7 @@ func ExecuteGaslessStablecoinObjectBalancePayment(ctx context.Context, payment G
 		if err != nil {
 			return nil, err
 		}
-		prepareResult, err := ExecuteSignedTransactionBlock(ctx, payment.Network, payment.Endpoints, preparePayload)
+		prepareResult, err := client.executeSignedTransactionBlock(ctx, preparePayload)
 		if err != nil {
 			return nil, err
 		}
@@ -381,7 +391,7 @@ func ExecuteGaslessStablecoinObjectBalancePayment(ctx context.Context, payment G
 	if err != nil {
 		return nil, err
 	}
-	paymentResult, err := ExecuteSignedTransactionBlock(ctx, payment.Network, payment.Endpoints, paymentPayload)
+	paymentResult, err := client.executeSignedTransactionBlock(ctx, paymentPayload)
 	if err != nil {
 		return nil, err
 	}
@@ -554,12 +564,43 @@ func (c suiTransactionRPCClient) listOwnedCoinObjects(ctx context.Context, owner
 		if err != nil {
 			return err
 		}
-		coinObjects = fetched
+		filtered, err := c.excludeAddressBalanceCoinObjects(ctx, endpoint, fetched)
+		if err != nil {
+			return err
+		}
+		coinObjects = filtered
 		return nil
 	}); err != nil {
 		return nil, fmt.Errorf("failed to list Sui coin objects: %w", err)
 	}
 	return coinObjects, nil
+}
+
+func (c suiTransactionRPCClient) excludeAddressBalanceCoinObjects(ctx context.Context, endpoint string, coinObjects []OwnedCoinObject) ([]OwnedCoinObject, error) {
+	filtered := make([]OwnedCoinObject, 0, len(coinObjects))
+	settlementTransactions := make(map[string]bool)
+	for _, coinObject := range coinObjects {
+		previousTransaction := strings.TrimSpace(coinObject.PreviousTransaction)
+		if previousTransaction == "" {
+			filtered = append(filtered, coinObject)
+			continue
+		}
+
+		isSettlement, ok := settlementTransactions[previousTransaction]
+		if !ok {
+			var err error
+			isSettlement, err = c.isAddressBalanceSettlementTransaction(ctx, endpoint, previousTransaction)
+			if err != nil {
+				return nil, err
+			}
+			settlementTransactions[previousTransaction] = isSettlement
+		}
+		if isSettlement {
+			continue
+		}
+		filtered = append(filtered, coinObject)
+	}
+	return filtered, nil
 }
 
 func (c suiTransactionRPCClient) listOwnedCoinObjectsFromEndpoint(ctx context.Context, endpoint string, owner string, coinType string) ([]OwnedCoinObject, error) {
@@ -585,6 +626,36 @@ func (c suiTransactionRPCClient) listOwnedCoinObjectsFromEndpoint(ctx context.Co
 	}
 
 	return coinObjects, nil
+}
+
+func (c suiTransactionRPCClient) isAddressBalanceSettlementTransaction(ctx context.Context, endpoint string, digest string) (bool, error) {
+	var result suiTransactionBlockResult
+	params := []interface{}{
+		digest,
+		map[string]bool{
+			"showInput": true,
+		},
+	}
+	if err := c.call(ctx, endpoint, "sui_getTransactionBlock", params, &result); err != nil {
+		return false, err
+	}
+	if result.Transaction == nil {
+		return false, nil
+	}
+	data := result.Transaction.Data
+	if data.Sender == nil || NormalizeAddress(data.Sender.String()) != NormalizeAddress("0x0") {
+		return false, nil
+	}
+	for _, command := range TransactionCommands(data.Transaction) {
+		if command.Kind != CommandKindMoveCall || command.MoveCall == nil {
+			continue
+		}
+		moveCall := command.MoveCall
+		if NormalizeAddress(moveCall.Package) == NormalizeAddress("0x2") && moveCall.Module == "accumulator_settlement" {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func (c suiTransactionRPCClient) executeSignedTransactionBlock(ctx context.Context, payload *Payload) (*ExecuteTransactionBlock, error) {
