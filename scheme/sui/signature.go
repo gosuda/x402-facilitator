@@ -16,6 +16,7 @@ import (
 	"math/big"
 	"strings"
 
+	"github.com/btcsuite/btcutil/bech32"
 	"github.com/decred/dcrd/dcrec/secp256k1/v4"
 	secp256k1ecdsa "github.com/decred/dcrd/dcrec/secp256k1/v4/ecdsa"
 	bcs "github.com/iotaledger/bcs-go"
@@ -101,6 +102,48 @@ func NewEd25519SignerFromHex(privateKeyHex string) (*Ed25519Signer, error) {
 		return nil, err
 	}
 	return NewEd25519SignerFromPrivateKey(privateKey)
+}
+
+func NewSignerFromPrivateKeyString(privateKey string) (Signer, error) {
+	privateKey = strings.TrimSpace(privateKey)
+	if privateKey == "" {
+		return nil, errors.New("empty_private_key")
+	}
+	if strings.HasPrefix(strings.ToLower(privateKey), "suiprivkey1") {
+		return newSignerFromSuiPrivateKey(privateKey)
+	}
+	return NewEd25519SignerFromHex(privateKey)
+}
+
+func newSignerFromSuiPrivateKey(privateKey string) (Signer, error) {
+	hrp, data, err := bech32.Decode(privateKey)
+	if err != nil {
+		return nil, fmt.Errorf("invalid_sui_private_key: %w", err)
+	}
+	if hrp != "suiprivkey" {
+		return nil, fmt.Errorf("invalid_sui_private_key_hrp: %s", hrp)
+	}
+
+	decoded, err := bech32.ConvertBits(data, 5, 8, false)
+	if err != nil {
+		return nil, fmt.Errorf("invalid_sui_private_key_payload: %w", err)
+	}
+	if len(decoded) < 2 {
+		return nil, fmt.Errorf("invalid_sui_private_key_length: %d", len(decoded))
+	}
+
+	scheme := decoded[0]
+	key := decoded[1:]
+	switch scheme {
+	case SignatureSchemeEd25519:
+		return NewEd25519SignerFromPrivateKey(key)
+	case SignatureSchemeSecp256k1:
+		return NewSecp256k1SignerFromPrivateKey(key)
+	case SignatureSchemeSecp256r1:
+		return NewSecp256r1SignerFromPrivateKey(key)
+	default:
+		return nil, fmt.Errorf("unsupported_sui_private_key_scheme: %d", scheme)
+	}
 }
 
 func (s *Ed25519Signer) SignTransaction(txBytes []byte) (string, error) {

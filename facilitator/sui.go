@@ -173,7 +173,16 @@ func (t *SuiFacilitator) Verify(ctx context.Context, payload *types.PaymentPaylo
 			Payer:          parsed.Payer,
 		}, nil
 	}
-	if err := dryRun.ValidateGaslessStablecoinPayment(req.Asset); err != nil {
+	asset, ok := t.canonicalGaslessStablecoin(req.Asset)
+	if !ok {
+		return &types.PaymentVerifyResponse{
+			IsValid:       false,
+			InvalidReason: types.ErrInvalidToken.Error(),
+			Payer:         parsed.Payer,
+		}, nil
+	}
+
+	if err := dryRun.ValidateGaslessStablecoinPayment(asset); err != nil {
 		return &types.PaymentVerifyResponse{
 			IsValid:        false,
 			InvalidReason:  types.ErrInvalidTransaction.Error(),
@@ -182,7 +191,7 @@ func (t *SuiFacilitator) Verify(ctx context.Context, payload *types.PaymentPaylo
 		}, nil
 	}
 
-	received := dryRun.BalanceDelta(req.PayTo, req.Asset)
+	received := dryRun.BalanceDelta(req.PayTo, asset)
 	if received.Cmp(reqAmount) != 0 {
 		return &types.PaymentVerifyResponse{
 			IsValid:        false,
@@ -337,8 +346,25 @@ func (t *SuiFacilitator) validatePaymentEnvelope(payload *types.PaymentPayload, 
 }
 
 func (t *SuiFacilitator) isGaslessStablecoin(asset string) bool {
-	_, ok := t.gaslessStablecoins[suischeme.NormalizeType(asset)]
+	_, ok := t.canonicalGaslessStablecoin(asset)
 	return ok
+}
+
+func (t *SuiFacilitator) canonicalGaslessStablecoin(asset string) (string, bool) {
+	if t == nil {
+		return "", false
+	}
+	if _, ok := t.gaslessStablecoins[suischeme.NormalizeType(asset)]; ok {
+		return asset, true
+	}
+	coinType, ok := suischeme.GetGaslessStablecoinType(t.network, asset)
+	if !ok {
+		return "", false
+	}
+	if _, ok := t.gaslessStablecoins[suischeme.NormalizeType(coinType)]; !ok {
+		return "", false
+	}
+	return coinType, true
 }
 
 func (t *SuiFacilitator) minTransferAmount(asset string) (*big.Int, bool) {
@@ -346,6 +372,11 @@ func (t *SuiFacilitator) minTransferAmount(asset string) (*big.Int, bool) {
 		return nil, false
 	}
 	minAmount, ok := t.minTransferAmounts[suischeme.NormalizeType(asset)]
+	if !ok {
+		if coinType, resolved := t.canonicalGaslessStablecoin(asset); resolved {
+			minAmount, ok = t.minTransferAmounts[suischeme.NormalizeType(coinType)]
+		}
+	}
 	if !ok {
 		return nil, false
 	}
@@ -367,7 +398,11 @@ func (t *SuiFacilitator) settledTransactionResponse(ctx context.Context, digest 
 	if !ok || reqAmount.Sign() <= 0 {
 		return nil, fmt.Errorf("invalid amount: %s", req.Amount)
 	}
-	received := suischeme.TransactionResultBalanceDelta(executed, req.PayTo, req.Asset)
+	asset, ok := t.canonicalGaslessStablecoin(req.Asset)
+	if !ok {
+		return nil, fmt.Errorf("invalid asset: %s", req.Asset)
+	}
+	received := suischeme.TransactionResultBalanceDelta(executed, req.PayTo, asset)
 	if received.Cmp(reqAmount) != 0 {
 		return nil, fmt.Errorf("settled transaction %s balance delta mismatch: expected %s, got %s", digest, reqAmount.String(), received.String())
 	}

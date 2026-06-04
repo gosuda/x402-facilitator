@@ -28,6 +28,12 @@ func TestEd25519SignerSignsAndVerifiesTransaction(t *testing.T) {
 	require.Equal(t, signer.Address(), payer)
 }
 
+func TestNewSignerFromSuiPrivateKey(t *testing.T) {
+	signer, err := NewSignerFromPrivateKeyString("suiprivkey1qqc6q82g50fuezxyvycy64fanyk7gh6un8cq4l6wshv97sz04uemyeu6jtx")
+	require.NoError(t, err)
+	require.Equal(t, NormalizeAddress("0x614dd2a3d669fb753003f49ca7c0e01a0676efb5241ed291c57028160113d245"), NormalizeAddress(signer.Address()))
+}
+
 func TestPayloadJSONRoundTrip(t *testing.T) {
 	signer := newTestSigner(t)
 	payload, err := NewSignedPayload([]byte{0x01, 0x02, 0x03}, signer)
