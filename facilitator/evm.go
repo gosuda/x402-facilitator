@@ -35,6 +35,8 @@ type EVMFacilitator struct {
 	address common.Address
 }
 
+const eip3009DeadlineBuffer int64 = 6
+
 func NewEVMFacilitator(network string, url string, privateKeyHex string) (*EVMFacilitator, error) {
 	if network == "" && url == "" {
 		return nil, fmt.Errorf("network or rpc url must be provided")
@@ -193,6 +195,109 @@ func (t *EVMFacilitator) Settle(ctx context.Context, payload *types.PaymentPaylo
 	return t.settleEIP3009(ctx, payload, req, raw)
 }
 
+func (t *EVMFacilitator) validateEVMPaymentEnvelope(payload *types.PaymentPayload, req *types.PaymentRequirements, payer string) *types.PaymentVerifyResponse {
+	if payload.Accepted.Scheme != string(t.scheme) || req.Scheme != string(t.scheme) {
+		return &types.PaymentVerifyResponse{
+			IsValid:       false,
+			InvalidReason: types.ErrIncompatibleScheme.Error(),
+			Payer:         payer,
+		}
+	}
+	if payload.Accepted.Network != t.network || req.Network != t.network {
+		return &types.PaymentVerifyResponse{
+			IsValid:       false,
+			InvalidReason: types.ErrNetworkMismatch.Error(),
+			Payer:         payer,
+		}
+	}
+	if !strings.EqualFold(strings.TrimSpace(payload.Accepted.Asset), strings.TrimSpace(req.Asset)) {
+		return &types.PaymentVerifyResponse{
+			IsValid:       false,
+			InvalidReason: types.ErrTokenMismatch.Error(),
+			Payer:         payer,
+		}
+	}
+	if payload.Accepted.Amount != req.Amount {
+		return &types.PaymentVerifyResponse{
+			IsValid:       false,
+			InvalidReason: types.ErrAmountMismatch.Error(),
+			Payer:         payer,
+		}
+	}
+	if !evmAddressMatches(payload.Accepted.PayTo, req.PayTo) {
+		return &types.PaymentVerifyResponse{
+			IsValid:       false,
+			InvalidReason: types.ErrRecipientMismatch.Error(),
+			Payer:         payer,
+		}
+	}
+	return nil
+}
+
+func validateEIP3009Authorization(auth *evm.Authorization, req *types.PaymentRequirements, payer string) *types.PaymentVerifyResponse {
+	if auth == nil || auth.Value == nil || auth.ValidAfter == nil || auth.ValidBefore == nil {
+		return &types.PaymentVerifyResponse{
+			IsValid:       false,
+			InvalidReason: types.ErrInvalidPayloadFormat.Error(),
+			Payer:         payer,
+		}
+	}
+
+	if !common.IsHexAddress(strings.TrimSpace(req.PayTo)) || auth.To != common.HexToAddress(strings.TrimSpace(req.PayTo)) {
+		return &types.PaymentVerifyResponse{
+			IsValid:       false,
+			InvalidReason: types.ErrRecipientMismatch.Error(),
+			Payer:         payer,
+		}
+	}
+
+	reqAmount, ok := new(big.Int).SetString(req.Amount, 10)
+	if !ok || reqAmount.Sign() <= 0 || auth.Value.Cmp(reqAmount) != 0 {
+		return &types.PaymentVerifyResponse{
+			IsValid:       false,
+			InvalidReason: types.ErrAmountMismatch.Error(),
+			Payer:         payer,
+		}
+	}
+
+	now := time.Now().Unix()
+	if auth.ValidBefore.Cmp(big.NewInt(now+eip3009DeadlineBuffer)) < 0 {
+		return &types.PaymentVerifyResponse{
+			IsValid:       false,
+			InvalidReason: types.ErrAuthorizationExpired.Error(),
+			Payer:         payer,
+		}
+	}
+	if auth.ValidAfter.Cmp(big.NewInt(now)) > 0 {
+		return &types.PaymentVerifyResponse{
+			IsValid:       false,
+			InvalidReason: types.ErrAuthorizationNotYetValid.Error(),
+			Payer:         payer,
+		}
+	}
+
+	return nil
+}
+
+func evmAddressMatches(left string, right string) bool {
+	left = strings.TrimSpace(left)
+	right = strings.TrimSpace(right)
+	if !common.IsHexAddress(left) || !common.IsHexAddress(right) {
+		return false
+	}
+	return common.HexToAddress(left) == common.HexToAddress(right)
+}
+
+func evmSettleResponseFromInvalid(invalid *types.PaymentVerifyResponse, network types.Network) *types.PaymentSettleResponse {
+	return &types.PaymentSettleResponse{
+		Success:      false,
+		ErrorReason:  invalid.InvalidReason,
+		ErrorMessage: invalid.InvalidMessage,
+		Payer:        invalid.Payer,
+		Network:      network,
+	}
+}
+
 func (t *EVMFacilitator) Supported() *types.SupportedResponse {
 	return &types.SupportedResponse{
 		Kinds: []types.SupportedKind{{
@@ -233,45 +338,39 @@ func (t *EVMFacilitator) verifyEIP3009(ctx context.Context, payload *types.Payme
 			InvalidReason: types.ErrInvalidPayloadFormat.Error(),
 		}, nil
 	}
+	auth := evmPayload.Authorization
+	payer := auth.From.String()
 
-	// Step 2: Scheme verification (scheme lives inside payload.Accepted in v2).
-	if payload.Accepted.Scheme != string(t.scheme) || req.Scheme != string(t.scheme) {
-		return &types.PaymentVerifyResponse{
-			IsValid:       false,
-			InvalidReason: types.ErrIncompatibleScheme.Error(),
-			Payer:         evmPayload.Authorization.From.String(),
-		}, nil
+	// Step 2: Bind client-echoed requirements to the server requirements.
+	if invalid := t.validateEVMPaymentEnvelope(payload, req, payer); invalid != nil {
+		return invalid, nil
+	}
+	if invalid := validateEIP3009Authorization(auth, req, payer); invalid != nil {
+		return invalid, nil
 	}
 
 	// Step 3: Network info and Contract info
-	if payload.Accepted.Network != t.network {
-		return &types.PaymentVerifyResponse{
-			IsValid:       false,
-			InvalidReason: types.ErrNetworkMismatch.Error(),
-			Payer:         evmPayload.Authorization.From.String(),
-		}, nil
-	}
-	chainID := evm.GetChainID(payload.Accepted.Network)
+	chainID := evm.GetChainID(req.Network)
 	if chainID == nil {
 		return &types.PaymentVerifyResponse{
 			IsValid:       false,
 			InvalidReason: types.ErrInvalidNetwork.Error(),
-			Payer:         evmPayload.Authorization.From.String(),
+			Payer:         payer,
 		}, nil
 	}
 	if chainID.Cmp(t.networkID) != 0 {
 		return &types.PaymentVerifyResponse{
 			IsValid:       false,
 			InvalidReason: types.ErrNetworkIDMismatch.Error(),
-			Payer:         evmPayload.Authorization.From.String(),
+			Payer:         payer,
 		}, nil
 	}
-	domainConfig := evm.GetDomainConfig(payload.Accepted.Network, req.Asset)
+	domainConfig := evm.GetDomainConfig(req.Network, req.Asset)
 	if domainConfig == nil {
 		return &types.PaymentVerifyResponse{
 			IsValid:       false,
 			InvalidReason: types.ErrTokenMismatch.Error(),
-			Payer:         evmPayload.Authorization.From.String(),
+			Payer:         payer,
 		}, nil
 	}
 
@@ -280,7 +379,7 @@ func (t *EVMFacilitator) verifyEIP3009(ctx context.Context, payload *types.Payme
 	if err != nil {
 		return nil, err
 	}
-	digest := evm.HashEip3009(evmPayload.Authorization, domainConfig)
+	digest := evm.HashEip3009(auth, domainConfig)
 	pubkey, err := evm.Ecrecover(digest, sig)
 	if err != nil {
 		return nil, err
@@ -289,50 +388,55 @@ func (t *EVMFacilitator) verifyEIP3009(ctx context.Context, payload *types.Payme
 		return &types.PaymentVerifyResponse{
 			IsValid:       false,
 			InvalidReason: types.ErrInvalidSignature.Error(),
-			Payer:         evmPayload.Authorization.From.String(),
+			Payer:         payer,
 		}, nil
 	}
-	if evm.PubkeyToAddress(pubkey) != evmPayload.Authorization.From {
+	if evm.PubkeyToAddress(pubkey) != auth.From {
 		return &types.PaymentVerifyResponse{
 			IsValid:       false,
 			InvalidReason: types.ErrInvalidSignature.Error(),
-			Payer:         evmPayload.Authorization.From.String(),
+			Payer:         payer,
 		}, nil
 	}
 
-	// Step 5: Validate payTo
-
-	// Step 6: Deadline check
-
-	// Step 7: TODO: Nonce freshness check (optional in v1)
-
-	// Step 8: Check ERC20 balance
+	// Step 5: Check nonce freshness
 	contract, err := eip3009.NewEip3009(domainConfig.VerifyingContract, client)
 	if err != nil {
 		return nil, fmt.Errorf("contract bind failed: %w", err)
 	}
-	balance, err := contract.BalanceOf(&bind.CallOpts{Context: ctx}, evmPayload.Authorization.From)
+	used, err := contract.AuthorizationState(&bind.CallOpts{Context: ctx}, auth.From, auth.Nonce)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get balance: %w", err)
+		return nil, fmt.Errorf("failed to get authorization state: %w", err)
 	}
-	if balance.Cmp(evmPayload.Authorization.Value) < 0 {
+	if used {
 		return &types.PaymentVerifyResponse{
 			IsValid:       false,
-			InvalidReason: types.ErrInsufficientBalance.Error(),
-			Payer:         evmPayload.Authorization.From.String(),
+			InvalidReason: types.ErrAuthorizationAlreadyUsed.Error(),
+			Payer:         payer,
 		}, nil
 	}
 
-	// Step 9: Check value in permit matches requirement
+	// Step 6: Check ERC20 balance
+	balance, err := contract.BalanceOf(&bind.CallOpts{Context: ctx}, auth.From)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get balance: %w", err)
+	}
+	if balance.Cmp(auth.Value) < 0 {
+		return &types.PaymentVerifyResponse{
+			IsValid:       false,
+			InvalidReason: types.ErrInsufficientBalance.Error(),
+			Payer:         payer,
+		}, nil
+	}
 
-	// Step 10: TODO: Check minimum payment threshold (e.g. for gas overhead)
+	// Step 7: TODO: Check minimum payment threshold (e.g. for gas overhead)
 
-	// Step 11: TODO: Check if resource already paid (next version)
+	// Step 8: TODO: Check if resource already paid (next version)
 
 	// ✅ All checks passed
 	return &types.PaymentVerifyResponse{
 		IsValid: true,
-		Payer:   evmPayload.Authorization.From.String(),
+		Payer:   payer,
 	}, nil
 }
 
@@ -355,6 +459,13 @@ func (t *EVMFacilitator) settleEIP3009(ctx context.Context, payload *types.Payme
 		}, nil
 	}
 	payer := evmPayload.Authorization.From.String()
+
+	if invalid := t.validateEVMPaymentEnvelope(payload, req, payer); invalid != nil {
+		return evmSettleResponseFromInvalid(invalid, network), nil
+	}
+	if invalid := validateEIP3009Authorization(evmPayload.Authorization, req, payer); invalid != nil {
+		return evmSettleResponseFromInvalid(invalid, network), nil
+	}
 
 	networkID := evm.GetChainID(req.Network)
 	if networkID == nil {
@@ -395,6 +506,24 @@ func (t *EVMFacilitator) settleEIP3009(ctx context.Context, payload *types.Payme
 			ErrorMessage: err.Error(),
 			Payer:        payer,
 			Network:      network,
+		}, nil
+	}
+	used, err := contract.AuthorizationState(&bind.CallOpts{Context: ctx}, evmPayload.Authorization.From, evmPayload.Authorization.Nonce)
+	if err != nil {
+		return &types.PaymentSettleResponse{
+			Success:      false,
+			ErrorReason:  types.ErrTransactionFailed.Error(),
+			ErrorMessage: err.Error(),
+			Payer:        payer,
+			Network:      network,
+		}, nil
+	}
+	if used {
+		return &types.PaymentSettleResponse{
+			Success:     false,
+			ErrorReason: types.ErrAuthorizationAlreadyUsed.Error(),
+			Payer:       payer,
+			Network:     network,
 		}, nil
 	}
 	clientSig, err := evm.ParseSignature(evmPayload.Signature) // client signature

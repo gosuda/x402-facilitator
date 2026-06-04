@@ -24,5 +24,17 @@
       { "name": "balance", "type": "uint256" }
     ],
     "stateMutability": "view"
+  },
+  {
+    "name": "authorizationState",
+    "type": "function",
+    "inputs": [
+      { "name": "authorizer", "type": "address" },
+      { "name": "nonce", "type": "bytes32" }
+    ],
+    "outputs": [
+      { "name": "used", "type": "bool" }
+    ],
+    "stateMutability": "view"
   }
 ]
