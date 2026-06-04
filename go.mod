@@ -20,8 +20,8 @@ require (
 	github.com/swaggo/swag v1.16.4
 	github.com/x402-foundation/x402/go v0.0.0-20260411143128-ea0768cd7e69
 	golang.org/x/crypto v0.46.0
-	google.golang.org/genproto/googleapis/rpc v0.0.0-20240318140521-94a12d6c2237
-	google.golang.org/grpc v1.64.0
+	google.golang.org/genproto/googleapis/rpc v0.0.0-20251202230838-ff82c1b0f217
+	google.golang.org/grpc v1.79.3
 	google.golang.org/protobuf v1.36.10
 )
 
