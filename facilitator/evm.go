@@ -163,6 +163,13 @@ func (t *EVMFacilitator) verifyWithEndpointFallback(ctx context.Context, operati
 
 // Verify detects the payload type and routes to the appropriate verification method.
 func (t *EVMFacilitator) Verify(ctx context.Context, payload *types.PaymentPayload, req *types.PaymentRequirements) (*types.PaymentVerifyResponse, error) {
+	if payload == nil || req == nil {
+		return &types.PaymentVerifyResponse{
+			IsValid:       false,
+			InvalidReason: types.ErrInvalidPayloadFormat.Error(),
+		}, nil
+	}
+
 	raw, err := json.Marshal(payload.Payload)
 	if err != nil {
 		return &types.PaymentVerifyResponse{
@@ -182,6 +189,18 @@ func (t *EVMFacilitator) Verify(ctx context.Context, payload *types.PaymentPaylo
 
 // Settle detects the payload type and routes to the appropriate settlement method.
 func (t *EVMFacilitator) Settle(ctx context.Context, payload *types.PaymentPayload, req *types.PaymentRequirements) (*types.PaymentSettleResponse, error) {
+	network := types.Network("")
+	if req != nil {
+		network = types.Network(req.Network)
+	}
+	if payload == nil || req == nil {
+		return &types.PaymentSettleResponse{
+			Success:     false,
+			ErrorReason: types.ErrInvalidPayloadFormat.Error(),
+			Network:     network,
+		}, nil
+	}
+
 	raw, err := json.Marshal(payload.Payload)
 	if err != nil {
 		return &types.PaymentSettleResponse{
@@ -196,6 +215,13 @@ func (t *EVMFacilitator) Settle(ctx context.Context, payload *types.PaymentPaylo
 }
 
 func (t *EVMFacilitator) validateEVMPaymentEnvelope(payload *types.PaymentPayload, req *types.PaymentRequirements, payer string) *types.PaymentVerifyResponse {
+	if payload == nil || req == nil {
+		return &types.PaymentVerifyResponse{
+			IsValid:       false,
+			InvalidReason: types.ErrInvalidPayloadFormat.Error(),
+			Payer:         payer,
+		}
+	}
 	if payload.Accepted.Scheme != string(t.scheme) || req.Scheme != string(t.scheme) {
 		return &types.PaymentVerifyResponse{
 			IsValid:       false,
@@ -235,7 +261,7 @@ func (t *EVMFacilitator) validateEVMPaymentEnvelope(payload *types.PaymentPayloa
 }
 
 func validateEIP3009Authorization(auth *evm.Authorization, req *types.PaymentRequirements, payer string) *types.PaymentVerifyResponse {
-	if auth == nil || auth.Value == nil || auth.ValidAfter == nil || auth.ValidBefore == nil {
+	if auth == nil || auth.Value == nil || auth.ValidAfter == nil || auth.ValidBefore == nil || req == nil {
 		return &types.PaymentVerifyResponse{
 			IsValid:       false,
 			InvalidReason: types.ErrInvalidPayloadFormat.Error(),
