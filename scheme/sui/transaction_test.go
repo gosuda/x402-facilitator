@@ -109,11 +109,9 @@ func TestBuildCoinObjectsToAddressBalanceTransferTransactionUsesAllObjects(t *te
 }
 
 func TestManualSuiTestnetObjectToBalanceThenBalanceToRecipientBroadcast(t *testing.T) {
-	// privateKey := "suiprivkey1qqc6q82g50fuezxyvycy64fanyk7gh6un8cq4l6wshv97sz04uemyeu6jtx"
-	privateKey := "suiprivkey1qr9kq2jw42f2lgnkv6twfarf97asxaesd6048tl6dnen5c5cc8kv2mumm8p"
-	// privateKey := ""
-	from := "0xea049676e91d29270f5a95042b6da73ff918fbae19377c0a8bf18ad105e88663"
-	to := "0x614dd2a3d669fb753003f49ca7c0e01a0676efb5241ed291c57028160113d245"
+	privateKey := ""
+	from := ""
+	to := ""
 	rpcURL := "https://sui-testnet-rpc.publicnode.com"
 	paymentAmount := "10000"
 
