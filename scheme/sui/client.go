@@ -20,8 +20,6 @@ type Client struct {
 	url       string
 	endpoints []string
 	grpc      *suigrpc.GRPCClient
-
-	addressBalanceCoinObjectCache sync.Map
 }
 
 type BalanceSummary struct {
@@ -185,11 +183,7 @@ func (c *Client) ListOwnedCoinObjects(ctx context.Context, owner string, coinTyp
 		if err != nil {
 			return err
 		}
-		filtered, err := c.excludeAddressBalanceCoinObjects(ctx, endpoint, fetched)
-		if err != nil {
-			return err
-		}
-		coinObjects = filtered
+		coinObjects = fetched
 		return nil
 	}); err != nil {
 		return nil, fmt.Errorf("failed to list Sui coin objects: %w", err)
@@ -278,39 +272,6 @@ func (c *Client) setActiveEndpoint(endpoint string) {
 	c.endpoints = utils.EndpointCandidates(append([]string{endpoint}, c.endpoints...))
 }
 
-func (c *Client) excludeAddressBalanceCoinObjects(ctx context.Context, endpoint string, coinObjects []OwnedCoinObject) ([]OwnedCoinObject, error) {
-	filtered := make([]OwnedCoinObject, 0, len(coinObjects))
-	settlementTransactions := make(map[string]bool)
-	for _, coinObject := range coinObjects {
-		objectID := coinObject.ObjectRef.ObjectID.String()
-		if _, ok := c.addressBalanceCoinObjectCache.Load(objectID); ok {
-			continue
-		}
-
-		previousTransaction := strings.TrimSpace(coinObject.PreviousTransaction)
-		if previousTransaction == "" {
-			filtered = append(filtered, coinObject)
-			continue
-		}
-
-		isSettlement, ok := settlementTransactions[previousTransaction]
-		if !ok {
-			var err error
-			isSettlement, err = c.isAddressBalanceSettlementTransaction(ctx, endpoint, previousTransaction)
-			if err != nil {
-				return nil, err
-			}
-			settlementTransactions[previousTransaction] = isSettlement
-		}
-		if isSettlement {
-			c.addressBalanceCoinObjectCache.Store(objectID, struct{}{})
-			continue
-		}
-		filtered = append(filtered, coinObject)
-	}
-	return filtered, nil
-}
-
 func (c *Client) listOwnedCoinObjectsFromEndpoint(ctx context.Context, endpoint string, owner string, coinType string) ([]OwnedCoinObject, error) {
 	var coinObjects []OwnedCoinObject
 	var pageToken []byte
@@ -334,30 +295,6 @@ func (c *Client) listOwnedCoinObjectsFromEndpoint(ctx context.Context, endpoint 
 	}
 
 	return coinObjects, nil
-}
-
-func (c *Client) isAddressBalanceSettlementTransaction(ctx context.Context, endpoint string, digest string) (bool, error) {
-	result, err := c.grpc.GetTransaction(ctx, endpoint, digest)
-	if err != nil {
-		return false, err
-	}
-	if result.GetTransaction() == nil {
-		return false, nil
-	}
-	data := transactionBlockDataFromGRPC(result.GetTransaction().GetTransaction())
-	if data == nil || data.Sender == nil || NormalizeAddress(data.Sender.String()) != NormalizeAddress("0x0") {
-		return false, nil
-	}
-	for _, command := range TransactionCommands(data.Transaction) {
-		if command.Kind != CommandKindMoveCall || command.MoveCall == nil {
-			continue
-		}
-		moveCall := command.MoveCall
-		if NormalizeAddress(moveCall.Package) == NormalizeAddress("0x2") && moveCall.Module == "accumulator_settlement" {
-			return true, nil
-		}
-	}
-	return false, nil
 }
 
 func (c *Client) resolveGaslessStablecoinExpirationFromEndpoint(ctx context.Context, endpoint string, chainDigest string) (*TransactionExpiration, error) {
@@ -414,7 +351,6 @@ func listOwnedCoinObjectsRequest(owner string, coinType string, pageToken []byte
 			"digest",
 			"object_type",
 			"balance",
-			"previous_transaction",
 		}},
 	}
 }

@@ -148,7 +148,12 @@ func TestManualSuiTestnetObjectToBalanceThenBalanceToRecipientBroadcast(t *testi
 		fmt.Printf("prepared %d objects totaling %s into address balance: %s\n", len(result.CoinObjects), result.PreparedAmount, result.PrepareTransaction.Digest.String())
 	}
 	require.NotNil(t, result.PaymentTransaction)
-	require.Equal(t, paymentAmount, TransactionResultBalanceDelta(result.PaymentTransaction, to, TestnetUSDCType).String())
+	paymentDelta := TransactionResultBalanceDelta(result.PaymentTransaction, to, TestnetUSDCType)
+	if NormalizeAddress(from) == NormalizeAddress(to) {
+		require.Zero(t, paymentDelta.Sign())
+	} else {
+		require.Equal(t, paymentAmount, paymentDelta.String())
+	}
 	fmt.Printf("sent %s testnet USDC address balance to %s: %s\n", paymentAmount, NormalizeAddress(to), result.PaymentTransaction.Digest.String())
 }
 
@@ -340,9 +345,12 @@ func TestListOwnedGaslessStablecoinCoinObjects(t *testing.T) {
 			require.Equal(t, coinObjectType(TestnetUSDCType), req.GetObjectType())
 			require.Equal(t, uint32(suiCoinObjectPageLimit), req.GetPageSize())
 			require.Empty(t, req.GetPageToken())
+			requireReadMask(t, req.GetReadMask(), "object_id", "version", "digest", "object_type", "balance")
+			firstObject := suiCoinObjectGRPCResult("0x1234", 7, 400000, TestnetUSDCType)
+			firstObject.PreviousTransaction = ptr("11111111111111111111111111111111")
 			return &rpcv2.ListOwnedObjectsResponse{
 				Objects: []*rpcv2.Object{
-					suiCoinObjectGRPCResult("0x1234", 7, 400000, TestnetUSDCType),
+					firstObject,
 					suiCoinObjectGRPCResult("0x5678", 8, 700000, TestnetUSDCType),
 				},
 			}, nil
