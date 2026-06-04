@@ -7,6 +7,7 @@ require (
 	github.com/btcsuite/btcutil v1.0.2
 	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.4.0
 	github.com/ethereum/go-ethereum v1.16.8
+	github.com/golang/protobuf v1.5.4
 	github.com/iotaledger/bcs-go v0.0.0-20250716100925-71f848cac593
 	github.com/knadh/koanf/parsers/toml v0.1.0
 	github.com/knadh/koanf/providers/file v1.2.0
@@ -19,6 +20,9 @@ require (
 	github.com/swaggo/swag v1.16.4
 	github.com/x402-foundation/x402/go v0.0.0-20260411143128-ea0768cd7e69
 	golang.org/x/crypto v0.46.0
+	google.golang.org/genproto/googleapis/rpc v0.0.0-20240318140521-94a12d6c2237
+	google.golang.org/grpc v1.64.0
+	google.golang.org/protobuf v1.36.10
 )
 
 require (
@@ -76,7 +80,6 @@ require (
 	golang.org/x/text v0.32.0 // indirect
 	golang.org/x/time v0.14.0 // indirect
 	golang.org/x/tools v0.39.0 // indirect
-	google.golang.org/protobuf v1.36.10 // indirect
 	gopkg.in/yaml.v2 v2.4.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )

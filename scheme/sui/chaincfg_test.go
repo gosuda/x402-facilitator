@@ -13,8 +13,8 @@ func TestGetNetworkInfoIncludesDefaultPublicNodeEndpoints(t *testing.T) {
 		networkID   string
 		defaultURL  string
 	}{
-		{"sui:mainnet", "Sui Mainnet", "mainnet", "https://sui-rpc.publicnode.com"},
-		{"sui:testnet", "Sui Testnet", "testnet", "https://sui-testnet-rpc.publicnode.com"},
+		{"sui:mainnet", "Sui Mainnet", "mainnet", "https://fullnode.mainnet.sui.io:443"},
+		{"sui:testnet", "Sui Testnet", "testnet", "https://fullnode.testnet.sui.io:443"},
 		{"sui:localnet", "Sui Localnet", "localnet", "http://127.0.0.1:9000"},
 	}
 

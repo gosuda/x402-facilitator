@@ -1,21 +1,14 @@
 package sui
 
 import (
-	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/binary"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"net/http"
 	"strconv"
 	"strings"
-	"sync"
-	"time"
 
-	"github.com/gosuda/x402-facilitator/utils"
 	bcs "github.com/iotaledger/bcs-go"
 )
 
@@ -324,25 +317,54 @@ func ExecuteGaslessStablecoinObjectBalancePayment(ctx context.Context, payment G
 		PreparedAmount: "0",
 	}
 
-	coinObjects, err := suiTransactionRPC.listOwnedCoinObjects(ctx, payment.Network, payment.Endpoints, sender, coinType)
+	client, err := NewClientForNetwork(payment.Network, payment.Endpoints)
 	if err != nil {
 		return nil, err
 	}
-	nonZeroCoinObjects := make([]OwnedCoinObject, 0, len(coinObjects))
-	for _, coinObject := range coinObjects {
-		if coinObject.Balance == 0 {
-			continue
-		}
-		nonZeroCoinObjects = append(nonZeroCoinObjects, coinObject)
-	}
-	result.CoinObjects = nonZeroCoinObjects
 
+	balance, err := client.Balance(ctx, sender, coinType)
+	if err != nil {
+		return nil, err
+	}
+	var nonZeroCoinObjects []OwnedCoinObject
 	var prepareAmount uint64
-	for _, coinObject := range nonZeroCoinObjects {
-		if prepareAmount > ^uint64(0)-coinObject.Balance {
-			return nil, errors.New("coin object balance sum overflows uint64")
+	if balance.AddressBalance < paymentAmount {
+		if balance.CoinBalance < paymentAmount-balance.AddressBalance {
+			return nil, fmt.Errorf("insufficient %s balance: need %d, address balance %d, coin object balance %d", coinType, paymentAmount, balance.AddressBalance, balance.CoinBalance)
 		}
-		prepareAmount += coinObject.Balance
+
+		coinObjects, err := client.ListOwnedCoinObjects(ctx, sender, coinType)
+		if err != nil {
+			return nil, err
+		}
+		nonZeroCoinObjects = make([]OwnedCoinObject, 0, len(coinObjects))
+		for _, coinObject := range coinObjects {
+			if coinObject.Balance == 0 {
+				continue
+			}
+			nonZeroCoinObjects = append(nonZeroCoinObjects, coinObject)
+		}
+		result.CoinObjects = nonZeroCoinObjects
+
+		for _, coinObject := range nonZeroCoinObjects {
+			if prepareAmount > ^uint64(0)-coinObject.Balance {
+				return nil, errors.New("coin object balance sum overflows uint64")
+			}
+			prepareAmount += coinObject.Balance
+		}
+
+		if prepareAmount < paymentAmount-balance.AddressBalance {
+			return nil, fmt.Errorf("insufficient %s balance: need %d, address balance %d, coin object balance %d", coinType, paymentAmount, balance.AddressBalance, prepareAmount)
+		}
+	}
+
+	info := GetNetworkInfo(payment.Network)
+	if info == nil {
+		return nil, fmt.Errorf("unsupported Sui network %q", payment.Network)
+	}
+	expiration, err := client.ResolveGaslessStablecoinExpiration(ctx, info.ChainDigest)
+	if err != nil {
+		return nil, err
 	}
 
 	if prepareAmount > 0 {
@@ -354,6 +376,7 @@ func ExecuteGaslessStablecoinObjectBalancePayment(ctx context.Context, payment G
 			Asset:       payment.Asset,
 			CoinObjects: nonZeroCoinObjects,
 			Endpoints:   payment.Endpoints,
+			Expiration:  expiration,
 		})
 		if err != nil {
 			return nil, err
@@ -362,7 +385,7 @@ func ExecuteGaslessStablecoinObjectBalancePayment(ctx context.Context, payment G
 		if err != nil {
 			return nil, err
 		}
-		prepareResult, err := suiTransactionRPC.executeSignedTransactionBlock(ctx, payment.Network, payment.Endpoints, preparePayload)
+		prepareResult, err := client.ExecuteTransactionBlock(ctx, preparePayload.Transaction, []string{preparePayload.Signature})
 		if err != nil {
 			return nil, err
 		}
@@ -373,12 +396,13 @@ func ExecuteGaslessStablecoinObjectBalancePayment(ctx context.Context, payment G
 	}
 
 	paymentTxBytes, err := BuildGaslessStablecoinTransferTransaction(ctx, GaslessStablecoinTransfer{
-		Sender:    sender,
-		Recipient: recipient,
-		Network:   payment.Network,
-		Asset:     payment.Asset,
-		Amount:    result.PaymentAmount,
-		Endpoints: payment.Endpoints,
+		Sender:     sender,
+		Recipient:  recipient,
+		Network:    payment.Network,
+		Asset:      payment.Asset,
+		Amount:     result.PaymentAmount,
+		Endpoints:  payment.Endpoints,
+		Expiration: expiration,
 	})
 	if err != nil {
 		return nil, err
@@ -387,7 +411,7 @@ func ExecuteGaslessStablecoinObjectBalancePayment(ctx context.Context, payment G
 	if err != nil {
 		return nil, err
 	}
-	paymentResult, err := suiTransactionRPC.executeSignedTransactionBlock(ctx, payment.Network, payment.Endpoints, paymentPayload)
+	paymentResult, err := client.ExecuteTransactionBlock(ctx, paymentPayload.Transaction, []string{paymentPayload.Signature})
 	if err != nil {
 		return nil, err
 	}
@@ -412,7 +436,11 @@ func ResolveGaslessStablecoinExpiration(ctx context.Context, network string, end
 		return nil, fmt.Errorf("unsupported Sui network %q", network)
 	}
 
-	return suiTransactionRPC.resolveGaslessStablecoinExpiration(ctx, network, endpoints, info.ChainDigest)
+	client, err := NewClientForNetwork(network, endpoints)
+	if err != nil {
+		return nil, err
+	}
+	return client.ResolveGaslessStablecoinExpiration(ctx, info.ChainDigest)
 }
 
 func ListOwnedGaslessStablecoinCoinObjects(ctx context.Context, network string, owner string, asset string, endpoints []string) ([]OwnedCoinObject, error) {
@@ -432,7 +460,11 @@ func ListOwnedGaslessStablecoinCoinObjects(ctx context.Context, network string, 
 		return nil, err
 	}
 
-	return suiTransactionRPC.listOwnedCoinObjects(ctx, network, endpoints, owner, coinType)
+	client, err := NewClientForNetwork(network, endpoints)
+	if err != nil {
+		return nil, err
+	}
+	return client.ListOwnedCoinObjects(ctx, owner, coinType)
 }
 
 func ExecuteSignedTransactionBlock(ctx context.Context, network string, endpoints []string, payload *Payload) (*ExecuteTransactionBlock, error) {
@@ -452,7 +484,11 @@ func ExecuteSignedTransactionBlock(ctx context.Context, network string, endpoint
 		return nil, ErrEmptySignature
 	}
 
-	return suiTransactionRPC.executeSignedTransactionBlock(ctx, network, endpoints, payload)
+	client, err := NewClientForNetwork(network, endpoints)
+	if err != nil {
+		return nil, err
+	}
+	return client.ExecuteTransactionBlock(ctx, payload.Transaction, []string{payload.Signature})
 }
 
 func randomUint32() (uint32, error) {
@@ -461,271 +497,6 @@ func randomUint32() (uint32, error) {
 		return 0, err
 	}
 	return binary.LittleEndian.Uint32(buf[:]), nil
-}
-
-type suiTransactionRPCClient struct {
-	httpClient                    *http.Client
-	addressBalanceCoinObjectCache sync.Map
-}
-
-var suiTransactionRPC = suiTransactionRPCClient{
-	httpClient: &http.Client{
-		Timeout: 30 * time.Second,
-	},
-}
-
-func (c *suiTransactionRPCClient) endpointCandidates(network string, endpoints []string) ([]string, error) {
-	endpointInput := append([]string{}, endpoints...)
-	if info := GetNetworkInfo(network); info != nil {
-		endpointInput = append(endpointInput, info.DefaultURLs...)
-	}
-	candidates := utils.EndpointCandidates(endpointInput)
-	if len(candidates) == 0 {
-		return nil, fmt.Errorf("no Sui RPC endpoints for network %q", network)
-	}
-	return candidates, nil
-}
-
-func (c *suiTransactionRPCClient) withEndpoint(ctx context.Context, network string, endpoints []string, action func(context.Context, string) error) error {
-	candidates, err := c.endpointCandidates(network, endpoints)
-	if err != nil {
-		return err
-	}
-	_, err = utils.DoWithEndpoint(ctx, candidates, action)
-	return err
-}
-
-func (c *suiTransactionRPCClient) call(ctx context.Context, endpoint string, method string, params []interface{}, result interface{}) error {
-	reqBody := suiTransactionRPCRequest{
-		JSONRPC: "2.0",
-		ID:      1,
-		Method:  method,
-		Params:  params,
-	}
-	body, err := json.Marshal(reqBody)
-	if err != nil {
-		return err
-	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return err
-	}
-	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		return fmt.Errorf("sui rpc http status %d: %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
-	}
-
-	var rpcResp suiTransactionRPCResponse
-	if err := json.Unmarshal(respBody, &rpcResp); err != nil {
-		return err
-	}
-	if rpcResp.Error != nil {
-		return rpcResp.Error
-	}
-	if len(rpcResp.Result) == 0 {
-		return errors.New("sui rpc missing result")
-	}
-	return json.Unmarshal(rpcResp.Result, result)
-}
-
-func (c *suiTransactionRPCClient) listOwnedCoinObjects(ctx context.Context, network string, endpoints []string, owner string, coinType string) ([]OwnedCoinObject, error) {
-	var coinObjects []OwnedCoinObject
-	if err := c.withEndpoint(ctx, network, endpoints, func(ctx context.Context, endpoint string) error {
-		fetched, err := c.listOwnedCoinObjectsFromEndpoint(ctx, endpoint, owner, coinType)
-		if err != nil {
-			return err
-		}
-		filtered, err := c.excludeAddressBalanceCoinObjects(ctx, endpoint, fetched)
-		if err != nil {
-			return err
-		}
-		coinObjects = filtered
-		return nil
-	}); err != nil {
-		return nil, fmt.Errorf("failed to list Sui coin objects: %w", err)
-	}
-	return coinObjects, nil
-}
-
-func (c *suiTransactionRPCClient) excludeAddressBalanceCoinObjects(ctx context.Context, endpoint string, coinObjects []OwnedCoinObject) ([]OwnedCoinObject, error) {
-	filtered := make([]OwnedCoinObject, 0, len(coinObjects))
-	settlementTransactions := make(map[string]bool)
-	for _, coinObject := range coinObjects {
-		objectID := coinObject.ObjectRef.ObjectID.String()
-		if _, ok := c.addressBalanceCoinObjectCache.Load(objectID); ok {
-			continue
-		}
-
-		previousTransaction := strings.TrimSpace(coinObject.PreviousTransaction)
-		if previousTransaction == "" {
-			filtered = append(filtered, coinObject)
-			continue
-		}
-
-		isSettlement, ok := settlementTransactions[previousTransaction]
-		if !ok {
-			var err error
-			isSettlement, err = c.isAddressBalanceSettlementTransaction(ctx, endpoint, previousTransaction)
-			if err != nil {
-				return nil, err
-			}
-			settlementTransactions[previousTransaction] = isSettlement
-		}
-		if isSettlement {
-			c.addressBalanceCoinObjectCache.Store(objectID, struct{}{})
-			continue
-		}
-		filtered = append(filtered, coinObject)
-	}
-	return filtered, nil
-}
-
-func (c *suiTransactionRPCClient) listOwnedCoinObjectsFromEndpoint(ctx context.Context, endpoint string, owner string, coinType string) ([]OwnedCoinObject, error) {
-	var coinObjects []OwnedCoinObject
-	var cursor *string
-
-	for {
-		var page suiCoinObjectPage
-		if err := c.call(ctx, endpoint, "suix_getCoins", []any{owner, coinType, cursor, suiCoinObjectPageLimit}, &page); err != nil {
-			return nil, err
-		}
-		for i, coin := range page.Data {
-			coinObject, err := coin.ownedCoinObject()
-			if err != nil {
-				return nil, fmt.Errorf("invalid coin object %d: %w", len(coinObjects)+i, err)
-			}
-			coinObjects = append(coinObjects, coinObject)
-		}
-		if !page.HasNextPage || page.NextCursor == nil || strings.TrimSpace(*page.NextCursor) == "" {
-			break
-		}
-		cursor = page.NextCursor
-	}
-
-	return coinObjects, nil
-}
-
-func (c *suiTransactionRPCClient) isAddressBalanceSettlementTransaction(ctx context.Context, endpoint string, digest string) (bool, error) {
-	var result suiTransactionBlockResult
-	params := []interface{}{
-		digest,
-		map[string]bool{
-			"showInput": true,
-		},
-	}
-	if err := c.call(ctx, endpoint, "sui_getTransactionBlock", params, &result); err != nil {
-		return false, err
-	}
-	if result.Transaction == nil {
-		return false, nil
-	}
-	data := result.Transaction.Data
-	if data.Sender == nil || NormalizeAddress(data.Sender.String()) != NormalizeAddress("0x0") {
-		return false, nil
-	}
-	for _, command := range TransactionCommands(data.Transaction) {
-		if command.Kind != CommandKindMoveCall || command.MoveCall == nil {
-			continue
-		}
-		moveCall := command.MoveCall
-		if NormalizeAddress(moveCall.Package) == NormalizeAddress("0x2") && moveCall.Module == "accumulator_settlement" {
-			return true, nil
-		}
-	}
-	return false, nil
-}
-
-func (c *suiTransactionRPCClient) executeSignedTransactionBlock(ctx context.Context, network string, endpoints []string, payload *Payload) (*ExecuteTransactionBlock, error) {
-	options := map[string]bool{
-		"showEffects":        true,
-		"showObjectChanges":  true,
-		"showBalanceChanges": true,
-	}
-	params := []interface{}{
-		payload.Transaction,
-		[]string{payload.Signature},
-		options,
-		"WaitForLocalExecution",
-	}
-
-	var result *ExecuteTransactionBlock
-	if err := c.withEndpoint(ctx, network, endpoints, func(ctx context.Context, endpoint string) error {
-		var executed ExecuteTransactionBlock
-		if err := c.call(ctx, endpoint, "sui_executeTransactionBlock", params, &executed); err != nil {
-			return err
-		}
-		result = &executed
-		return nil
-	}); err != nil {
-		return nil, fmt.Errorf("failed to execute Sui transaction block: %w", err)
-	}
-	if result == nil {
-		return nil, errors.New("missing Sui transaction execution result")
-	}
-	return result, nil
-}
-
-func (c *suiTransactionRPCClient) resolveGaslessStablecoinExpiration(ctx context.Context, network string, endpoints []string, chainDigest string) (*TransactionExpiration, error) {
-	var expiration *TransactionExpiration
-	if err := c.withEndpoint(ctx, network, endpoints, func(ctx context.Context, endpoint string) error {
-		resolved, err := c.resolveGaslessStablecoinExpirationFromEndpoint(ctx, endpoint, chainDigest)
-		if err != nil {
-			return err
-		}
-		expiration = resolved
-		return nil
-	}); err != nil {
-		return nil, fmt.Errorf("failed to resolve gasless stablecoin expiration: %w", err)
-	}
-	if expiration == nil {
-		return nil, errors.New("failed to resolve gasless stablecoin expiration")
-	}
-	return expiration, nil
-}
-
-func (c *suiTransactionRPCClient) resolveGaslessStablecoinExpirationFromEndpoint(ctx context.Context, endpoint string, chainDigest string) (*TransactionExpiration, error) {
-	var state struct {
-		Epoch string `json:"epoch"`
-	}
-	if err := c.call(ctx, endpoint, "suix_getLatestSuiSystemState", []interface{}{}, &state); err != nil {
-		return nil, err
-	}
-
-	epoch, err := strconv.ParseUint(strings.TrimSpace(state.Epoch), 10, 64)
-	if err != nil {
-		return nil, fmt.Errorf("invalid Sui epoch %q: %w", state.Epoch, err)
-	}
-	if epoch == ^uint64(0) {
-		return nil, errors.New("Sui epoch is too large")
-	}
-
-	if strings.TrimSpace(chainDigest) == "" {
-		var checkpoint struct {
-			Digest string `json:"digest"`
-		}
-		if err := c.call(ctx, endpoint, "sui_getCheckpoint", []interface{}{"0"}, &checkpoint); err != nil {
-			return nil, err
-		}
-		chainDigest = checkpoint.Digest
-	}
-
-	nonce, err := randomUint32()
-	if err != nil {
-		return nil, err
-	}
-	return TransactionExpirationValidDuring(chainDigest, epoch, epoch+1, nonce)
 }
 
 func resolveGaslessStablecoinAsset(network string, asset string) (string, error) {

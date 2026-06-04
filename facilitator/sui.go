@@ -1,22 +1,14 @@
 package facilitator
 
 import (
-	"bytes"
 	"context"
-	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"math/big"
-	"net/http"
 	"strings"
-	"sync"
-	"time"
 
 	suischeme "github.com/gosuda/x402-facilitator/scheme/sui"
 	"github.com/gosuda/x402-facilitator/types"
-	"github.com/gosuda/x402-facilitator/utils"
 )
 
 var _ Facilitator = (*SuiFacilitator)(nil)
@@ -24,7 +16,7 @@ var _ Facilitator = (*SuiFacilitator)(nil)
 type SuiFacilitator struct {
 	scheme              types.Scheme
 	network             string
-	client              *suiRPCClient
+	client              *suischeme.Client
 	gaslessStablecoins  map[string]struct{}
 	gaslessStableAssets []string
 	minTransferAmounts  map[string]*big.Int
@@ -47,7 +39,7 @@ func NewSuiFacilitatorWithOptions(network string, url string, privateKeyHex stri
 	if networkInfo == nil {
 		return nil, fmt.Errorf("unsupported Sui network %q", network)
 	}
-	client := newSuiRPCClientWithEndpoints(url, networkInfo.DefaultURLs)
+	client := suischeme.NewClientWithEndpoints(url, networkInfo.DefaultURLs)
 
 	assets := suischeme.GetGaslessStablecoinTypes(network)
 	if opts.GaslessStablecoinTypes != nil {
@@ -161,7 +153,7 @@ func (t *SuiFacilitator) Verify(ctx context.Context, payload *types.PaymentPaylo
 		}, nil
 	}
 
-	dryRun, err := t.client.dryRunTransactionBlock(ctx, parsed.Payload.Transaction)
+	dryRun, err := t.client.DryRunTransactionBlock(ctx, parsed.Payload.Transaction)
 	if err != nil {
 		return nil, fmt.Errorf("dry run transaction failed: %w", err)
 	}
@@ -238,7 +230,7 @@ func (t *SuiFacilitator) Settle(ctx context.Context, payload *types.PaymentPaylo
 		}, nil
 	}
 
-	executed, err := t.client.executeTransactionBlock(ctx, suiPayload.Transaction, []string{suiPayload.Signature})
+	executed, err := t.client.ExecuteTransactionBlock(ctx, suiPayload.Transaction, []string{suiPayload.Signature})
 	if err != nil {
 		if settled, lookupErr := t.settledTransactionResponse(ctx, payloadDigest, req, verified.Payer, network); lookupErr == nil && settled != nil {
 			return settled, nil
@@ -387,7 +379,7 @@ func (t *SuiFacilitator) settledTransactionResponse(ctx context.Context, digest 
 	if strings.TrimSpace(digest) == "" {
 		return nil, errors.New("empty transaction digest")
 	}
-	executed, err := t.client.getTransactionBlock(ctx, digest)
+	executed, err := t.client.GetTransactionBlock(ctx, digest)
 	if err != nil {
 		return nil, err
 	}
@@ -432,8 +424,12 @@ func (t *SuiFacilitator) parseAndVerifySuiPayload(ctx context.Context, payload m
 	if err != nil {
 		return nil, err
 	}
+	var zkLoginVerifier suischeme.ZkLoginVerifier
+	if t != nil && t.client != nil {
+		zkLoginVerifier = t.client.VerifyZkLoginSignature
+	}
 	payer, err := suischeme.VerifySignatureWithOptions(ctx, suiPayload.Signature, txBytes, suischeme.SignatureVerifyOptions{
-		ZkLoginVerifier: t.client.verifyZkLoginSignature,
+		ZkLoginVerifier: zkLoginVerifier,
 	})
 	if err != nil {
 		return nil, err
@@ -478,182 +474,4 @@ func invalidPayloadReason(err error) string {
 		return types.ErrInvalidSignature.Error()
 	}
 	return types.ErrInvalidPayloadFormat.Error()
-}
-
-type suiRPCClient struct {
-	mu         sync.RWMutex
-	url        string
-	endpoints  []string
-	httpClient *http.Client
-}
-
-func newSuiRPCClientWithEndpoints(url string, endpoints []string) *suiRPCClient {
-	candidates := utils.EndpointCandidates(append([]string{url}, endpoints...))
-	activeURL := ""
-	if len(candidates) > 0 {
-		activeURL = candidates[0]
-	}
-	return &suiRPCClient{
-		url:       activeURL,
-		endpoints: candidates,
-		httpClient: &http.Client{
-			Timeout: 30 * time.Second,
-		},
-	}
-}
-
-func (c *suiRPCClient) dryRunTransactionBlock(ctx context.Context, txBytesBase64 string) (*suischeme.DryRunTransactionBlock, error) {
-	var result suischeme.DryRunTransactionBlock
-	if err := c.call(ctx, "sui_dryRunTransactionBlock", []interface{}{txBytesBase64}, &result); err != nil {
-		return nil, err
-	}
-	return &result, nil
-}
-
-func (c *suiRPCClient) executeTransactionBlock(ctx context.Context, txBytesBase64 string, signatures []string) (*suischeme.ExecuteTransactionBlock, error) {
-	options := map[string]bool{
-		"showEffects":        true,
-		"showBalanceChanges": true,
-	}
-	params := []interface{}{txBytesBase64, signatures, options, "WaitForLocalExecution"}
-
-	var result suischeme.ExecuteTransactionBlock
-	if err := c.call(ctx, "sui_executeTransactionBlock", params, &result); err != nil {
-		return nil, err
-	}
-	return &result, nil
-}
-
-func (c *suiRPCClient) getTransactionBlock(ctx context.Context, digest string) (*suischeme.ExecuteTransactionBlock, error) {
-	options := map[string]bool{
-		"showEffects":        true,
-		"showBalanceChanges": true,
-	}
-	params := []interface{}{digest, options}
-
-	var result suischeme.ExecuteTransactionBlock
-	if err := c.call(ctx, "sui_getTransactionBlock", params, &result); err != nil {
-		return nil, err
-	}
-	return &result, nil
-}
-
-func (c *suiRPCClient) verifyZkLoginSignature(ctx context.Context, author string, txBytes []byte, signature string) (bool, error) {
-	params := []interface{}{
-		base64.StdEncoding.EncodeToString(txBytes),
-		signature,
-		"TransactionData",
-		author,
-	}
-
-	var result suiZkLoginVerifyResult
-	if err := c.call(ctx, "sui_verifyZkLoginSignature", params, &result); err != nil {
-		return false, err
-	}
-	return result.Success && len(result.Errors) == 0, nil
-}
-
-func (c *suiRPCClient) call(ctx context.Context, method string, params []interface{}, result interface{}) error {
-	candidates := c.endpointCandidates()
-	selected, err := utils.DoWithEndpoint(ctx, candidates, func(ctx context.Context, endpoint string) error {
-		return c.callEndpoint(ctx, endpoint, method, params, result)
-	})
-	if err != nil {
-		return err
-	}
-	c.setActiveEndpoint(selected)
-	return nil
-}
-
-func (c *suiRPCClient) endpointCandidates() []string {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	return utils.EndpointCandidates(append([]string{c.url}, c.endpoints...))
-}
-
-func (c *suiRPCClient) setActiveEndpoint(endpoint string) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.url = endpoint
-	c.endpoints = utils.EndpointCandidates(append([]string{endpoint}, c.endpoints...))
-}
-
-func (c *suiRPCClient) callEndpoint(ctx context.Context, endpoint string, method string, params []interface{}, result interface{}) error {
-	reqBody := suiRPCRequest{
-		JSONRPC: "2.0",
-		ID:      1,
-		Method:  method,
-		Params:  params,
-	}
-	body, err := json.Marshal(reqBody)
-	if err != nil {
-		return err
-	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return err
-	}
-	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		return fmt.Errorf("sui rpc http status %d: %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
-	}
-
-	var rpcResp suiRPCResponse
-	if err := json.Unmarshal(respBody, &rpcResp); err != nil {
-		return err
-	}
-	if rpcResp.Error != nil {
-		return rpcResp.Error
-	}
-	if len(rpcResp.Result) == 0 {
-		return errors.New("sui rpc missing result")
-	}
-	return json.Unmarshal(rpcResp.Result, result)
-}
-
-type suiRPCRequest struct {
-	JSONRPC string        `json:"jsonrpc"`
-	ID      int           `json:"id"`
-	Method  string        `json:"method"`
-	Params  []interface{} `json:"params"`
-}
-
-type suiRPCResponse struct {
-	JSONRPC string          `json:"jsonrpc"`
-	ID      int             `json:"id"`
-	Result  json.RawMessage `json:"result"`
-	Error   *suiRPCError    `json:"error,omitempty"`
-}
-
-type suiZkLoginVerifyResult struct {
-	Success bool     `json:"success"`
-	Errors  []string `json:"errors,omitempty"`
-}
-
-type suiRPCError struct {
-	Code    int             `json:"code"`
-	Message string          `json:"message"`
-	Data    json.RawMessage `json:"data,omitempty"`
-}
-
-func (e *suiRPCError) Error() string {
-	if e == nil {
-		return ""
-	}
-	if len(e.Data) == 0 {
-		return fmt.Sprintf("sui rpc error %d: %s", e.Code, e.Message)
-	}
-	return fmt.Sprintf("sui rpc error %d: %s: %s", e.Code, e.Message, string(e.Data))
 }

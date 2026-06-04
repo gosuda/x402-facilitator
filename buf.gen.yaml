@@ -1,0 +1,20 @@
+version: v2
+managed:
+  enabled: true
+  disable:
+    - file_option: go_package
+      path: google/rpc/status.proto
+    - file_option: go_package
+      path: google/rpc/error_details.proto
+  override:
+    - file_option: go_package_prefix
+      value: github.com/gosuda/x402-facilitator/scheme/sui/grpc/pb
+plugins:
+  - local: protoc-gen-go
+    out: scheme/sui/grpc/pb
+    opt: paths=source_relative
+  - local: protoc-gen-go-grpc
+    out: scheme/sui/grpc/pb
+    opt:
+      - paths=source_relative
+      - require_unimplemented_servers=false
