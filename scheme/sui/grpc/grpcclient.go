@@ -24,9 +24,9 @@ const (
 
 var (
 	simulateTransactionReadMask = readMask(
-		"effects.status",
-		"effects.changed_objects",
-		"balance_changes",
+		"transaction.effects.status",
+		"transaction.effects.changed_objects",
+		"transaction.balance_changes",
 	)
 	executeTransactionReadMask = readMask(
 		"digest",
