@@ -45,7 +45,16 @@ func run() {
 	}
 	log.Logger = zerolog.New(os.Stdout).With().Timestamp().Caller().Logger()
 
-	paymentFacilitator, err := facilitator.NewFacilitator(config.Scheme, config.Network, config.Url, config.PrivateKey)
+	var paymentFacilitator facilitator.Facilitator
+	if config.DelegationManager != "" {
+		// erc7710 mode: the policy lives on-chain behind the pinned delegation manager, so this
+		// path needs no token registry and no EIP-712 domain - verification is simulation.
+		paymentFacilitator, err = facilitator.NewERC7710Facilitator(
+			config.Network, config.Url, config.PrivateKey, config.DelegationManager,
+		)
+	} else {
+		paymentFacilitator, err = facilitator.NewFacilitator(config.Scheme, config.Network, config.Url, config.PrivateKey)
+	}
 	if err != nil {
 		log.Fatal().Err(err).Msg("Failed to init facilitator, shutting down...")
 	}

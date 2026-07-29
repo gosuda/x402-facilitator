@@ -13,6 +13,9 @@ type Config struct {
 	Port       int          `mapstructure:"port"`
 	Url        string       `mapstructure:"url"`
 	PrivateKey string       `mapstructure:"privateKey"`
+	// DelegationManager, when set, serves the x402 v2 erc7710 asset-transfer method against this
+	// pinned ERC-7710 manager instead of the token-signature paths. See facilitator/erc7710.go.
+	DelegationManager string `mapstructure:"delegationManager"`
 }
 
 func LoadConfig(path string) (*Config, error) {
