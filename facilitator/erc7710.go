@@ -59,6 +59,10 @@ type ERC7710Facilitator struct {
 	// live in the mempool regardless of whether anyone is still listening.
 	confirmTimeout time.Duration
 
+	// minFeePayerBalance is the floor below which this instance stops calling itself ready.
+	// Set so a drained fee payer is reported before settlements start failing on it, not after.
+	minFeePayerBalance *big.Int
+
 	// broadcast serialises nonce acquisition and sending. Two concurrent settlements that each
 	// read the pending nonce would build two transactions with the same one, and the chain
 	// would keep whichever arrived first - silently dropping a payment somebody was told about.
@@ -109,6 +113,8 @@ func NewERC7710Facilitator(network, url, privateKeyHex, managerHex string) (*ERC
 		address:        crypto.PubkeyToAddress(privateKey.PublicKey),
 		settleGasLimit: 1_500_000,
 		confirmTimeout: 90 * time.Second,
+		// Roughly a hundred settlements of headroom at GIWA's fees - enough warning to top up.
+		minFeePayerBalance: big.NewInt(2e14),
 	}, nil
 }
 
@@ -259,13 +265,7 @@ func (m *ERC7710Facilitator) confirm(
 	}
 
 	if receipt.Status != gethtypes.ReceiptStatusSuccessful {
-		reason, message := "delegation_rejected", "settlement reverted"
-		if _, callErr := m.client.CallContract(ctx, ethereum.CallMsg{
-			From: m.address, To: &m.manager, Data: calldata,
-		}, new(big.Int).Sub(receipt.BlockNumber, big.NewInt(1))); callErr != nil {
-			reason, message = erc7710.DecodeRevert(revertData(callErr))
-		}
-		return unresolved(reason, message)
+		return unresolved(m.whyItReverted(ctx, calldata, receipt.BlockNumber))
 	}
 
 	// Status alone only says the manager did not revert. Confirm the money moved: the token's
@@ -294,6 +294,57 @@ func (m *ERC7710Facilitator) confirm(
 	}
 }
 
+// whyItReverted recovers the reason a mined settlement failed.
+//
+// The honest answer comes from replaying the call against the state the block executed on. Not
+// every node will give it: GIWA's public RPC frequently answers a historical eth_call with a bare
+// revert and no data, and "reverted without data" tells a caller nothing they can act on. So the
+// replay is tried first and, failing that, the same call is simulated against current state -
+// whatever refuses it now is almost always what refused it then, and a decoded reason a caller can
+// act on beats a precise one they cannot.
+func (m *ERC7710Facilitator) whyItReverted(
+	ctx context.Context, calldata []byte, blockNumber *big.Int,
+) (reason, message string) {
+	at := func(block *big.Int) (string, string, bool) {
+		_, err := m.client.CallContract(ctx, ethereum.CallMsg{
+			From: m.address, To: &m.manager, Data: calldata,
+		}, block)
+		if err == nil {
+			return "", "", false // it passes there; that block cannot explain the failure
+		}
+		data := revertData(err)
+		if len(data) < 4 {
+			return "", "", false
+		}
+		r, msg := erc7710.DecodeRevert(data)
+		return r, msg, true
+	}
+
+	if r, msg, ok := at(new(big.Int).Sub(blockNumber, big.NewInt(1))); ok {
+		return r, msg
+	}
+
+	// Falling back to current state only works once the node we are talking to has caught up.
+	// GIWA's public RPC load-balances across backends at different heights, so immediately after
+	// a receipt the "latest" one answers from may still predate the very transaction that
+	// produced it - and simulating there would report the payment as fine. Wait for a height
+	// that includes it, briefly, then ask.
+	for i := 0; i < 6; i++ {
+		if head, err := m.client.BlockNumber(ctx); err == nil && head >= blockNumber.Uint64() {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return "delegation_rejected", "settlement reverted; the reason could not be recovered before the request ended"
+		case <-time.After(time.Second):
+		}
+	}
+	if r, msg, ok := at(nil); ok {
+		return r, msg + " (re-simulated against current state; the node returned no data for the failing block)"
+	}
+	return "delegation_rejected", "settlement reverted, and the node returned no revert data to decode"
+}
+
 // requestKey identifies one settlement request. Deliberately covers the payload AND what it is
 // being spent on, so the same authorisation may still settle a different purchase - that reuse
 // is the whole point of this method.
@@ -306,6 +357,34 @@ func requestKey(payment *types.PaymentPayload, req *types.PaymentRequirements) s
 		h.Write([]byte{0})
 	}
 	return hex.EncodeToString(h.Sum(nil))
+}
+
+// Ready reports whether this facilitator can settle right now.
+//
+// Two things it cannot do without: a reachable chain that is the one it was configured for, and a
+// fee payer with gas. Both fail in ways a restart does not fix, which is precisely why they belong
+// behind /ready rather than /health - taking the instance out of rotation is the useful response,
+// killing it is not.
+func (m *ERC7710Facilitator) Ready(ctx context.Context) error {
+	chainID, err := m.client.ChainID(ctx)
+	if err != nil {
+		return fmt.Errorf("chain unreachable: %w", err)
+	}
+	if chainID.Cmp(m.networkID) != 0 {
+		// Worth failing loudly: an RPC that quietly moved to another chain would otherwise
+		// have settlements broadcast into it.
+		return fmt.Errorf("rpc serves chain %s, configured for %s", chainID, m.networkID)
+	}
+
+	balance, err := m.client.BalanceAt(ctx, m.address, nil)
+	if err != nil {
+		return fmt.Errorf("fee payer balance unreadable: %w", err)
+	}
+	if balance.Cmp(m.minFeePayerBalance) < 0 {
+		return fmt.Errorf("fee payer %s holds %s wei, below the floor of %s",
+			m.address.Hex(), balance, m.minFeePayerBalance)
+	}
+	return nil
 }
 
 // Supported advertises the erc7710 method, the pinned manager, and - crucially - the settlement

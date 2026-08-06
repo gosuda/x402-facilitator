@@ -3,6 +3,9 @@ package api
 import (
 	"encoding/json"
 	"net/http"
+	"time"
+
+	"golang.org/x/time/rate"
 
 	_ "github.com/gosuda/x402-facilitator/api/swagger"
 	"github.com/labstack/echo/v4"
@@ -22,12 +25,30 @@ type server struct {
 	facilitator facilitator.Facilitator
 }
 
+// Options tune the surface without changing it for anyone who does not ask.
+//
+// Both default to off, so an existing deployment behaves exactly as before. They exist because a
+// facilitator reachable from the open internet is a key holding gas: without a limiter it is a
+// faucet that anyone can drain by asking it to broadcast, and the cost of that is real money
+// rather than noisy logs.
+type Options struct {
+	// SettleRateLimit caps requests per second per client IP on the settling paths. Zero leaves
+	// them unlimited.
+	SettleRateLimit float64
+	// SettleBurst allows short bursts above the rate. Defaults to twice the rate when unset.
+	SettleBurst int
+}
+
 var _ http.Handler = (*server)(nil)
 
-func NewServer(facilitator facilitator.Facilitator) *server {
+func NewServer(facilitator facilitator.Facilitator, opts ...Options) *server {
 	s := &server{
 		Echo:        echo.New(),
 		facilitator: facilitator,
+	}
+	var o Options
+	if len(opts) > 0 {
+		o = opts[0]
 	}
 
 	s.Use(middleware.RequestID())
@@ -38,9 +59,30 @@ func NewServer(facilitator facilitator.Facilitator) *server {
 	}))
 	s.Use(echomiddleware.CORS())
 
-	s.POST("/verify", s.Verify)
-	s.POST("/settle", s.Settle)
+	// The limiter guards the paths that spend: /settle broadcasts, and /verify is the cheap
+	// probe an attacker would use to hunt for a context worth broadcasting.
+	var paid []echo.MiddlewareFunc
+	if o.SettleRateLimit > 0 {
+		burst := o.SettleBurst
+		if burst <= 0 {
+			burst = int(o.SettleRateLimit * 2)
+		}
+		paid = append(paid, echomiddleware.RateLimiterWithConfig(echomiddleware.RateLimiterConfig{
+			Store: echomiddleware.NewRateLimiterMemoryStoreWithConfig(
+				echomiddleware.RateLimiterMemoryStoreConfig{
+					Rate:      rate.Limit(o.SettleRateLimit),
+					Burst:     burst,
+					ExpiresIn: 3 * time.Minute,
+				},
+			),
+		}))
+	}
+
+	s.POST("/verify", s.Verify, paid...)
+	s.POST("/settle", s.Settle, paid...)
 	s.GET("/supported", s.Supported)
+	s.GET("/health", s.Health)
+	s.GET("/ready", s.Ready)
 	s.GET("/swagger/*", echoSwagger.WrapHandler)
 
 	return s
@@ -115,4 +157,39 @@ func (s *server) Supported(c echo.Context) error {
 	}
 
 	return c.JSON(http.StatusOK, resp)
+}
+
+// Health answers whether the process is alive. Nothing else - a liveness probe that consults the
+// chain would have a restart loop as its failure mode, which is the wrong cure for a bad RPC.
+//
+// @Summary  Liveness
+// @Success  200 {object} map[string]string
+// @Router   /health [get]
+func (s *server) Health(c echo.Context) error {
+	return c.JSON(http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// Ready answers whether this instance can presently do its job, which is a different question.
+// A facilitator that cannot reach the chain, or whose fee payer is out of gas, is healthy and
+// useless; 503 takes it out of rotation without killing it.
+//
+// A facilitator that does not implement ReadinessChecker has nothing to add beyond being alive,
+// and says so rather than claiming a check it never ran.
+//
+// @Summary  Readiness
+// @Success  200 {object} map[string]string
+// @Failure  503 {object} map[string]string
+// @Router   /ready [get]
+func (s *server) Ready(c echo.Context) error {
+	checker, ok := s.facilitator.(facilitator.ReadinessChecker)
+	if !ok {
+		return c.JSON(http.StatusOK, map[string]string{"status": "ok", "checked": "liveness only"})
+	}
+	if err := checker.Ready(c.Request().Context()); err != nil {
+		return c.JSON(http.StatusServiceUnavailable, map[string]string{
+			"status": "not ready",
+			"reason": err.Error(),
+		})
+	}
+	return c.JSON(http.StatusOK, map[string]string{"status": "ready"})
 }

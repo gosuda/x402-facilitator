@@ -59,7 +59,10 @@ func run() {
 		log.Fatal().Err(err).Msg("Failed to init facilitator, shutting down...")
 	}
 
-	api := api.NewServer(paymentFacilitator)
+	api := api.NewServer(paymentFacilitator, api.Options{
+		SettleRateLimit: config.SettleRateLimit,
+		SettleBurst:     config.SettleBurst,
+	})
 
 	// Initialize Server
 	server := &http.Server{

@@ -8,3 +8,9 @@ port = 8402
 url = "https://sepolia-rpc.giwa.io"
 privateKey = "<fee-payer private key, hex without 0x>"
 delegationManager = "0xfd0fCCCcF8071852783b5133b3CC47461f33e6Cd"
+
+# Requests per second per client IP on /verify and /settle. A public facilitator is a key holding
+# gas: without this it is a faucet anyone can drain by asking it to broadcast. Leave unset when the
+# endpoint is private.
+settleRateLimit = 2
+settleBurst = 5

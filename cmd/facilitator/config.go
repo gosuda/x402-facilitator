@@ -16,6 +16,12 @@ type Config struct {
 	// DelegationManager, when set, serves the x402 v2 erc7710 asset-transfer method against this
 	// pinned ERC-7710 manager instead of the token-signature paths. See facilitator/erc7710.go.
 	DelegationManager string `mapstructure:"delegationManager"`
+
+	// SettleRateLimit caps requests per second per client IP on /verify and /settle. Leave it
+	// unset for a private deployment; set it before exposing one to the open internet, where an
+	// unlimited settling endpoint is a key holding gas that anyone may ask to spend it.
+	SettleRateLimit float64 `mapstructure:"settleRateLimit"`
+	SettleBurst     int     `mapstructure:"settleBurst"`
 }
 
 func LoadConfig(path string) (*Config, error) {
