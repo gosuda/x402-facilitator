@@ -15,3 +15,10 @@ RUN apt update -y && apt install -y ca-certificates \
 
 WORKDIR /app
 COPY --from=builder /app/facilitator /app
+# Without this the image builds and cannot run: `docker run <image> --config …` tries to exec the
+# flag, because nothing here says what the container's process is.
+#
+# The config path is a default rather than a hard-coded argument, so mounting a file elsewhere and
+# passing --config still works.
+ENTRYPOINT ["/app/facilitator"]
+CMD ["--config", "/app/config.toml"]
