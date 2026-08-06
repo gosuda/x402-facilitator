@@ -3,11 +3,17 @@ package facilitator
 import (
 	"context"
 	"crypto/ecdsa"
+	"crypto/sha256"
+	"encoding/hex"
+
 	"fmt"
 	"math/big"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/ethereum/go-ethereum"
+	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	gethtypes "github.com/ethereum/go-ethereum/core/types"
@@ -41,10 +47,28 @@ type ERC7710Facilitator struct {
 	privateKey *ecdsa.PrivateKey
 	address    common.Address
 
-	// settleGasLimit is fixed rather than estimated: GIWA's public RPC load-balances across
-	// backends that lag each other, so estimateGas can disagree with the sequencer's canonical
-	// state and fail spuriously. 1.5M covers a full 4-caveat redemption several times over.
+	// settleGasLimit is the ceiling used when estimation is unavailable. Estimation is tried
+	// first, but public RPCs that load-balance across lagging backends can disagree with the
+	// sequencer's canonical state and fail spuriously, and a settlement that never broadcasts
+	// because a gas estimate flinched is a worse outcome than one that overpays headroom.
+	// 1.5M covers a full multi-caveat redemption several times over.
 	settleGasLimit uint64
+
+	// confirmTimeout bounds how long Settle waits for a receipt before reporting that it does
+	// not know the outcome. Not how long the transaction has: a broadcast transaction stays
+	// live in the mempool regardless of whether anyone is still listening.
+	confirmTimeout time.Duration
+
+	// broadcast serialises nonce acquisition and sending. Two concurrent settlements that each
+	// read the pending nonce would build two transactions with the same one, and the chain
+	// would keep whichever arrived first - silently dropping a payment somebody was told about.
+	broadcast sync.Mutex
+
+	// inFlight collapses duplicate settlements of the SAME request while one is running. It is
+	// deliberately not payload-keyed idempotency: erc7710's defining property is that one
+	// authorisation can settle MORE THAN ONCE, so refusing a repeat outright would break the
+	// feature. What it prevents is a client's retry storm paying twice for one intent.
+	inFlight sync.Map
 }
 
 var _ Facilitator = (*ERC7710Facilitator)(nil)
@@ -84,6 +108,7 @@ func NewERC7710Facilitator(network, url, privateKeyHex, managerHex string) (*ERC
 		privateKey:     privateKey,
 		address:        crypto.PubkeyToAddress(privateKey.PublicKey),
 		settleGasLimit: 1_500_000,
+		confirmTimeout: 90 * time.Second,
 	}, nil
 }
 
@@ -115,8 +140,13 @@ func (m *ERC7710Facilitator) Verify(
 	return &types.PaymentVerifyResponse{IsValid: true, Payer: payer}, nil
 }
 
-// Settle broadcasts the redemption. The facilitator pays gas; funds move directly from the root
-// delegator's account to the payee. The payer needs no ETH at all.
+// Settle broadcasts the redemption and waits to find out whether it worked.
+//
+// Three outcomes, and the third is the one most implementations get wrong. A settlement can
+// succeed, it can be refused, or the facilitator can simply not know yet - and reporting "failed"
+// for the third is how a seller ends up charging twice for one payment. A broadcast transaction
+// stays in the mempool whether or not anyone is still waiting for it, so an unknown outcome is
+// returned as unknown, with the hash, for the caller to resolve.
 func (m *ERC7710Facilitator) Settle(
 	ctx context.Context, payment *types.PaymentPayload, req *types.PaymentRequirements,
 ) (*types.PaymentSettleResponse, error) {
@@ -130,6 +160,18 @@ func (m *ERC7710Facilitator) Settle(
 		}, nil
 	}
 
+	// One settlement per identical request at a time. A retrying client should not be able to
+	// pay twice for one intent just because the first attempt was slow.
+	key := requestKey(payment, req)
+	if _, busy := m.inFlight.LoadOrStore(key, struct{}{}); busy {
+		return &types.PaymentSettleResponse{
+			Success: false, ErrorReason: "settlement_in_flight",
+			ErrorMessage: "an identical settlement is already being broadcast; wait for its result",
+			Payer:        payer, Network: types.Network(m.network),
+		}, nil
+	}
+	defer m.inFlight.Delete(key)
+
 	// Simulate first: a revert here costs nothing, a reverted broadcast costs the fee payer gas.
 	if _, err := m.client.CallContract(ctx, ethereum.CallMsg{
 		From: m.address, To: &m.manager, Data: calldata,
@@ -141,6 +183,26 @@ func (m *ERC7710Facilitator) Settle(
 		}, nil
 	}
 
+	signed, err := m.sign(ctx, calldata)
+	if err != nil {
+		return nil, err
+	}
+	if err := m.client.SendTransaction(ctx, signed); err != nil {
+		return nil, fmt.Errorf("broadcast settlement: %w", err)
+	}
+	hash := signed.Hash().Hex()
+	log.Info().Str("tx", hash).Str("payer", payer).Str("payTo", req.PayTo).
+		Str("amount", req.Amount).Msg("erc7710 settlement broadcast")
+
+	return m.confirm(ctx, signed, calldata, payer, req, hash), nil
+}
+
+// sign builds and signs the settlement transaction while holding the broadcast lock, so no two
+// settlements can be handed the same nonce.
+func (m *ERC7710Facilitator) sign(ctx context.Context, calldata []byte) (*gethtypes.Transaction, error) {
+	m.broadcast.Lock()
+	defer m.broadcast.Unlock()
+
 	nonce, err := m.client.PendingNonceAt(ctx, m.address)
 	if err != nil {
 		return nil, fmt.Errorf("fetch nonce: %w", err)
@@ -150,36 +212,100 @@ func (m *ERC7710Facilitator) Settle(
 		return nil, fmt.Errorf("suggest gas price: %w", err)
 	}
 
+	// Estimate, but never let a flinching estimate stop a settlement that simulation already
+	// showed to be valid: fall back to the ceiling and pay for the headroom.
+	gas := m.settleGasLimit
+	if estimated, err := m.client.EstimateGas(ctx, ethereum.CallMsg{
+		From: m.address, To: &m.manager, Data: calldata,
+	}); err == nil && estimated > 0 {
+		if padded := estimated + estimated/4; padded < m.settleGasLimit {
+			gas = padded
+		}
+	}
+
 	tx := gethtypes.NewTx(&gethtypes.DynamicFeeTx{
 		ChainID:   m.networkID,
 		Nonce:     nonce,
 		GasTipCap: gasPrice,
 		GasFeeCap: new(big.Int).Mul(gasPrice, big.NewInt(2)),
-		Gas:       m.settleGasLimit,
+		Gas:       gas,
 		To:        &m.manager,
 		Data:      calldata,
 	})
-	signed, err := gethtypes.SignTx(tx, gethtypes.LatestSignerForChainID(m.networkID), m.privateKey)
-	if err != nil {
-		return nil, fmt.Errorf("sign settlement: %w", err)
-	}
-	if err := m.client.SendTransaction(ctx, signed); err != nil {
-		return nil, fmt.Errorf("broadcast settlement: %w", err)
+	return gethtypes.SignTx(tx, gethtypes.LatestSignerForChainID(m.networkID), m.privateKey)
+}
+
+// confirm waits for the receipt and decides what actually happened.
+func (m *ERC7710Facilitator) confirm(
+	ctx context.Context, signed *gethtypes.Transaction, calldata []byte,
+	payer string, req *types.PaymentRequirements, hash string,
+) *types.PaymentSettleResponse {
+	unresolved := func(reason, message string) *types.PaymentSettleResponse {
+		return &types.PaymentSettleResponse{
+			Success: false, ErrorReason: reason, ErrorMessage: message,
+			Payer: payer, Transaction: hash, Network: types.Network(m.network),
+		}
 	}
 
-	log.Info().
-		Str("tx", signed.Hash().Hex()).
-		Str("payer", payer).
-		Str("payTo", req.PayTo).
-		Str("amount", req.Amount).
-		Msg("erc7710 settlement broadcast")
+	waitCtx, cancel := context.WithTimeout(ctx, m.confirmTimeout)
+	defer cancel()
+	receipt, err := bind.WaitMined(waitCtx, m.client, signed)
+	if err != nil {
+		// The transaction is still live in the mempool; only our patience ran out. Saying
+		// "failed" here is what makes a seller charge a second time for one payment.
+		log.Warn().Str("tx", hash).Err(err).Msg("erc7710 settlement outcome unknown")
+		return unresolved("settlement_unknown",
+			"broadcast, but no receipt within the confirmation window - resolve by transaction hash")
+	}
+
+	if receipt.Status != gethtypes.ReceiptStatusSuccessful {
+		reason, message := "delegation_rejected", "settlement reverted"
+		if _, callErr := m.client.CallContract(ctx, ethereum.CallMsg{
+			From: m.address, To: &m.manager, Data: calldata,
+		}, new(big.Int).Sub(receipt.BlockNumber, big.NewInt(1))); callErr != nil {
+			reason, message = erc7710.DecodeRevert(revertData(callErr))
+		}
+		return unresolved(reason, message)
+	}
+
+	// Status alone only says the manager did not revert. Confirm the money moved: the token's
+	// own Transfer log, the exact amount, to the payee the requirements named.
+	amount, _ := new(big.Int).SetString(req.Amount, 10)
+	from, found := erc7710.FindSettlementTransfer(
+		receipt, common.HexToAddress(req.Asset), common.HexToAddress(req.PayTo), amount,
+	)
+	if !found {
+		log.Error().Str("tx", hash).Msg("erc7710 settlement mined without a matching transfer")
+		return unresolved("settlement_unverified",
+			"mined, but no Transfer of the required amount to the payee was found in the receipt")
+	}
+	if payer != "" && !strings.EqualFold(from.Hex(), payer) {
+		log.Error().Str("tx", hash).Str("expected", payer).Str("actual", from.Hex()).
+			Msg("erc7710 settlement paid from an unexpected account")
+		return unresolved("settlement_unverified",
+			fmt.Sprintf("funds left %s, not the delegator %s named by the permission context", from.Hex(), payer))
+	}
 
 	return &types.PaymentSettleResponse{
 		Success:     true,
 		Payer:       payer,
-		Transaction: signed.Hash().Hex(),
+		Transaction: hash,
 		Network:     types.Network(m.network),
-	}, nil
+	}
+}
+
+// requestKey identifies one settlement request. Deliberately covers the payload AND what it is
+// being spent on, so the same authorisation may still settle a different purchase - that reuse
+// is the whole point of this method.
+func requestKey(payment *types.PaymentPayload, req *types.PaymentRequirements) string {
+	h := sha256.New()
+	for _, part := range []string{
+		fmt.Sprint(payment.Payload), req.Asset, req.PayTo, req.Amount, req.Scheme, req.Network,
+	} {
+		h.Write([]byte(part))
+		h.Write([]byte{0})
+	}
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 // Supported advertises the erc7710 method, the pinned manager, and - crucially - the settlement
