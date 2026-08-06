@@ -68,6 +68,10 @@ type ERC7710Facilitator struct {
 	// would keep whichever arrived first - silently dropping a payment somebody was told about.
 	broadcast sync.Mutex
 
+	// pending survives a restart: see pending.go for why a forgotten broadcast is worse than a
+	// failed one.
+	pending *PendingLog
+
 	// inFlight collapses duplicate settlements of the SAME request while one is running. It is
 	// deliberately not payload-keyed idempotency: erc7710's defining property is that one
 	// authorisation can settle MORE THAN ONCE, so refusing a repeat outright would break the
@@ -78,7 +82,7 @@ type ERC7710Facilitator struct {
 var _ Facilitator = (*ERC7710Facilitator)(nil)
 
 // NewERC7710Facilitator connects to an EVM chain by CAIP-2 id and pins the delegation manager.
-func NewERC7710Facilitator(network, url, privateKeyHex, managerHex string) (*ERC7710Facilitator, error) {
+func NewERC7710Facilitator(network, url, privateKeyHex, managerHex, pendingLogPath string) (*ERC7710Facilitator, error) {
 	var chainID uint64
 	if _, err := fmt.Sscanf(network, "eip155:%d", &chainID); err != nil {
 		return nil, fmt.Errorf("erc7710 facilitator requires an eip155 CAIP-2 network, got %q", network)
@@ -104,6 +108,11 @@ func NewERC7710Facilitator(network, url, privateKeyHex, managerHex string) (*ERC
 		return nil, fmt.Errorf("invalid private key: %w", err)
 	}
 
+	pending, err := NewPendingLog(pendingLogPath)
+	if err != nil {
+		return nil, fmt.Errorf("open pending settlement log: %w", err)
+	}
+
 	return &ERC7710Facilitator{
 		network:        network,
 		networkID:      networkID,
@@ -115,6 +124,7 @@ func NewERC7710Facilitator(network, url, privateKeyHex, managerHex string) (*ERC
 		confirmTimeout: 90 * time.Second,
 		// Roughly a hundred settlements of headroom at GIWA's fees - enough warning to top up.
 		minFeePayerBalance: big.NewInt(2e14),
+		pending:            pending,
 	}, nil
 }
 
@@ -197,10 +207,20 @@ func (m *ERC7710Facilitator) Settle(
 		return nil, fmt.Errorf("broadcast settlement: %w", err)
 	}
 	hash := signed.Hash().Hex()
+	m.pending.Add(PendingSettlement{
+		Hash: hash, Payer: payer, PayTo: req.PayTo,
+		Asset: req.Asset, Amount: req.Amount, BroadcastAt: time.Now().UTC(),
+	})
 	log.Info().Str("tx", hash).Str("payer", payer).Str("payTo", req.PayTo).
 		Str("amount", req.Amount).Msg("erc7710 settlement broadcast")
 
-	return m.confirm(ctx, signed, calldata, payer, req, hash), nil
+	resp := m.confirm(ctx, signed, calldata, payer, req, hash)
+	// Only a KNOWN outcome closes the record. An unknown one stays for the next process, which
+	// is the entire point: the transaction outlives our patience.
+	if resp.ErrorReason != "settlement_unknown" {
+		m.pending.Resolve(hash)
+	}
+	return resp, nil
 }
 
 // sign builds and signs the settlement transaction while holding the broadcast lock, so no two
@@ -357,6 +377,59 @@ func requestKey(payment *types.PaymentPayload, req *types.PaymentRequirements) s
 		h.Write([]byte{0})
 	}
 	return hex.EncodeToString(h.Sum(nil))
+}
+
+// Reconcile resolves settlements a previous process broadcast but never saw the end of.
+//
+// Called at boot, before serving. Each inherited hash is asked about directly: mined and matching
+// the transfer it claimed, mined and not, or still unknown. The first two are settled facts that
+// can be written to the log and forgotten; the third stays, because a transaction that has not
+// been mined yet has not failed - it is waiting, and so should we.
+//
+// It never re-broadcasts. Whatever the old process sent is already signed with a nonce that
+// either landed or did not, and sending it again is how one payment becomes two.
+func (m *ERC7710Facilitator) Reconcile(ctx context.Context) {
+	inherited := m.pending.Unresolved()
+	if len(inherited) == 0 {
+		return
+	}
+	log.Info().Int("count", len(inherited)).Msg("erc7710 resolving settlements inherited from a previous process")
+
+	for _, e := range inherited {
+		hash := common.HexToHash(e.Hash)
+		receipt, err := m.client.TransactionReceipt(ctx, hash)
+		if err != nil {
+			log.Warn().Str("tx", e.Hash).Str("payTo", e.PayTo).Str("amount", e.Amount).
+				Msg("erc7710 inherited settlement still unmined - left open")
+			continue
+		}
+
+		if receipt.Status != gethtypes.ReceiptStatusSuccessful {
+			log.Warn().Str("tx", e.Hash).Msg("erc7710 inherited settlement reverted")
+			m.pending.Resolve(e.Hash)
+			continue
+		}
+
+		amount, ok := new(big.Int).SetString(e.Amount, 10)
+		if !ok {
+			m.pending.Resolve(e.Hash)
+			continue
+		}
+		if _, found := erc7710.FindSettlementTransfer(
+			receipt, common.HexToAddress(e.Asset), common.HexToAddress(e.PayTo), amount,
+		); !found {
+			// Mined, successful, and yet the payee was not paid what was claimed. Worth a loud
+			// line: it is the shape a tampered execution would leave behind.
+			log.Error().Str("tx", e.Hash).Str("payTo", e.PayTo).Str("amount", e.Amount).
+				Msg("erc7710 inherited settlement mined without the expected transfer")
+			m.pending.Resolve(e.Hash)
+			continue
+		}
+
+		log.Info().Str("tx", e.Hash).Str("payTo", e.PayTo).Str("amount", e.Amount).
+			Msg("erc7710 inherited settlement confirmed settled")
+		m.pending.Resolve(e.Hash)
+	}
 }
 
 // Ready reports whether this facilitator can settle right now.

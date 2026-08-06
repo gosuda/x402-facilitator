@@ -50,13 +50,19 @@ func run() {
 		// erc7710 mode: the policy lives on-chain behind the pinned delegation manager, so this
 		// path needs no token registry and no EIP-712 domain - verification is simulation.
 		paymentFacilitator, err = facilitator.NewERC7710Facilitator(
-			config.Network, config.Url, config.PrivateKey, config.DelegationManager,
+			config.Network, config.Url, config.PrivateKey, config.DelegationManager, config.PendingLog,
 		)
 	} else {
 		paymentFacilitator, err = facilitator.NewFacilitator(config.Scheme, config.Network, config.Url, config.PrivateKey)
 	}
 	if err != nil {
 		log.Fatal().Err(err).Msg("Failed to init facilitator, shutting down...")
+	}
+
+	// Resolve anything a previous process broadcast and never saw the end of, before this one
+	// starts accepting new work.
+	if r, ok := paymentFacilitator.(interface{ Reconcile(context.Context) }); ok {
+		r.Reconcile(context.Background())
 	}
 
 	api := api.NewServer(paymentFacilitator, api.Options{

@@ -14,3 +14,7 @@ delegationManager = "0xfd0fCCCcF8071852783b5133b3CC47461f33e6Cd"
 # endpoint is private.
 settleRateLimit = 2
 settleBurst = 5
+
+# Where broadcast-but-unconfirmed settlements are recorded, so a restart resolves them against the
+# chain instead of forgetting a payment it already sent.
+pendingLog = "/var/lib/x402-facilitator/pending.json"

@@ -20,6 +20,11 @@ type Config struct {
 	// SettleRateLimit caps requests per second per client IP on /verify and /settle. Leave it
 	// unset for a private deployment; set it before exposing one to the open internet, where an
 	// unlimited settling endpoint is a key holding gas that anyone may ask to spend it.
+	// PendingLog is where broadcast-but-unconfirmed settlements are written so a restart can
+	// resolve them instead of forgetting them. Unset means no record, which is fine for a
+	// throwaway instance and not for one holding gas.
+	PendingLog string `mapstructure:"pendingLog"`
+
 	SettleRateLimit float64 `mapstructure:"settleRateLimit"`
 	SettleBurst     int     `mapstructure:"settleBurst"`
 }
