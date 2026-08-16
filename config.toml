@@ -11,10 +11,15 @@ scheme = "exact"
 #   eip155:84532  — Base Sepolia
 #   eip155:8453   — Base mainnet
 #   eip155:42161  — Arbitrum One
+#   casper:casper      — Casper mainnet
+#   casper:casper-test — Casper testnet
 network = "eip155:84532"
 
 # RPC endpoint the facilitator uses to verify and broadcast transactions
-# on the configured network.
+# on the configured network. For casper:* networks this is the base URL of
+# the Casper x402 facilitator service (default
+# https://x402-facilitator.cspr.cloud, overridable with the
+# CASPER_FACILITATOR_URL environment variable).
 url = "https://sepolia.base.org"
 
 # Private key of the facilitator's fee payer (hex, no 0x prefix). Leave
