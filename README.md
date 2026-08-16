@@ -13,9 +13,9 @@ x402 v2 treats the payment **scheme** (the on-chain protocol used to move
 funds) and the **network** (which chain that protocol runs on) as two
 independent axes. This facilitator currently supports:
 
-| Scheme  | `eip155:*` (EVM) | `solana:*` | `sui:*` | `tron:*` |
-|---------|:----------------:|:----------:|:-------:|:--------:|
-| `exact` |        ✅        |     🚧     |   🚧    |    🚧    |
+| Scheme  | `eip155:*` (EVM) | `solana:*` | `sui:*` | `tron:*` | `casper:*` |
+|---------|:----------------:|:----------:|:-------:|:--------:|:----------:|
+| `exact` |        ✅        |     🚧     |   🚧    |    🚧    |     ✅     |
 
 Networks are specified in [CAIP-2](https://chainagnostic.org/CAIPs/caip-2)
 format (e.g. `eip155:84532` for Base Sepolia, `eip155:8453` for Base
@@ -23,6 +23,19 @@ mainnet, `eip155:42161` for Arbitrum One). The `exact` scheme supports
 both EIP-3009 `transferWithAuthorization` and Permit2
 `PermitWitnessTransferFrom` payloads on EVM chains; see the `--method`
 flag on `x402-client` to pick between them.
+
+### Casper
+
+Casper is addressed as `casper:casper` (mainnet) and `casper:casper-test`
+(testnet). Settlement uses wCSPR, a CEP-18 token with 9 decimals, so
+amounts are integer motes encoded as decimal strings; conversions that
+would lose sub-mote precision fail instead of truncating.
+
+Casper payments are authorized by the payer and broadcast by a Casper
+facilitator service, so `url` points at that service rather than a node
+RPC endpoint. It defaults to `https://x402-facilitator.cspr.cloud` and can
+be overridden through `url` in `config.toml` or the
+`CASPER_FACILITATOR_URL` environment variable.
 
 ## How to run
 

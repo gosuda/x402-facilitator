@@ -157,8 +157,10 @@ func TestCasperFacilitatorVerifyEnvelopeValidation(t *testing.T) {
 			wantReason: types.ErrNetworkMismatch.Error(),
 		},
 		{
-			name:       "asset mismatch",
-			mutate:     func(p *types.PaymentPayload, _ *types.PaymentRequirements) { p.Accepted.Asset = "hash-" + casperTestContract },
+			name: "asset mismatch",
+			mutate: func(p *types.PaymentPayload, _ *types.PaymentRequirements) {
+				p.Accepted.Asset = "hash-" + casperTestContract
+			},
 			wantReason: types.ErrTokenMismatch.Error(),
 		},
 		{
