@@ -29,7 +29,9 @@ func NewFacilitator(scheme types.Scheme, network, rpcUrl string, privateKeyHex s
 		return NewSuiFacilitator(network, rpcUrl, privateKeyHex)
 	case strings.HasPrefix(network, "tron:"):
 		return NewTronFacilitator(network, rpcUrl, privateKeyHex)
+	case strings.HasPrefix(network, "casper:"):
+		return NewCasperFacilitator(network, rpcUrl, privateKeyHex)
 	default:
-		return nil, fmt.Errorf("unsupported network %q: expected a CAIP-2 identifier (eip155:*, solana:*, sui:*, tron:*)", network)
+		return nil, fmt.Errorf("unsupported network %q: expected a CAIP-2 identifier (eip155:*, solana:*, sui:*, tron:*, casper:*)", network)
 	}
 }
