@@ -7,6 +7,7 @@ import (
 	"github.com/gosuda/x402-facilitator/scheme"
 	casperfacilitator "github.com/gosuda/x402-facilitator/scheme/casper/facilitator"
 	evmfacilitator "github.com/gosuda/x402-facilitator/scheme/evm/facilitator"
+	nanofacilitator "github.com/gosuda/x402-facilitator/scheme/nano/facilitator"
 	solanafacilitator "github.com/gosuda/x402-facilitator/scheme/solana/facilitator"
 	suifacilitator "github.com/gosuda/x402-facilitator/scheme/sui/facilitator"
 	tronfacilitator "github.com/gosuda/x402-facilitator/scheme/tron/facilitator"
@@ -36,7 +37,9 @@ func newFacilitator(scheme types.Scheme, network, rpcURL, privateKeyHex string) 
 		return tronfacilitator.NewTronFacilitator(network, rpcURL, privateKeyHex)
 	case strings.HasPrefix(network, "casper:"):
 		return casperfacilitator.NewCasperFacilitator(network, rpcURL, privateKeyHex)
+	case strings.HasPrefix(network, "nano:"):
+		return nanofacilitator.NewNanoFacilitator(network, rpcURL, privateKeyHex)
 	default:
-		return nil, fmt.Errorf("unsupported network %q: expected a CAIP-2 identifier (eip155:*, solana:*, sui:*, tron:*, casper:*)", network)
+		return nil, fmt.Errorf("unsupported network %q: expected a CAIP-2 identifier (eip155:*, solana:*, sui:*, tron:*, casper:*, nano:*)", network)
 	}
 }

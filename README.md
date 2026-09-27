@@ -13,9 +13,9 @@ x402 v2 treats the payment **scheme** (the on-chain protocol used to move
 funds) and the **network** (which chain that protocol runs on) as two
 independent axes. This facilitator currently supports:
 
-| Scheme  | `eip155:*` (EVM) | `solana:*` | `sui:*` | `tron:*` | `casper:*` |
-|---------|:----------------:|:----------:|:-------:|:--------:|:----------:|
-| `exact` |        ✅        |     ✅     |   🚧    |    🚧    |     ✅     |
+| Scheme  | `eip155:*` (EVM) | `solana:*` | `sui:*` | `tron:*` | `casper:*` | `nano:*` |
+|---------|:----------------:|:----------:|:-------:|:--------:|:----------:|:--------:|
+| `exact` |        ✅        |     ✅     |   🚧    |    🚧    |     ✅     |    ✅     |
 
 Networks are specified in [CAIP-2](https://chainagnostic.org/CAIPs/caip-2)
 format (e.g. `eip155:84532` for Base Sepolia, `eip155:8453` for Base
@@ -36,6 +36,22 @@ facilitator service, so `url` points at that service rather than a node
 RPC endpoint. It defaults to `https://x402-facilitator.cspr.cloud` and can
 be overridden through `url` in `config.toml` or the
 `CASPER_FACILITATOR_URL` environment variable.
+
+### Nano
+
+Nano is addressed as `nano:mainnet`. It is a feeless DAG ledger with no
+smart contracts and no memo field, so the payer broadcasts its own signed
+send block directly and there is no facilitator settlement to broadcast or
+gas token to carry. The facilitator is read-only on the chain: it verifies
+the referenced send block (in `payload.blockHash`) on at least two
+independent public RPC nodes (default `https://rpc.nano.to` and
+`https://rainstorm.city/api`), failing closed if any node errors or the
+block is unconfirmed, not a send, or its destination/amount do not match
+the requirements. Settlement re-verifies then binds the block hash exactly
+once. Because Nano has no memo, the binding to a specific invoice is the
+pay-to destination (a per-invoice Nano account) plus the exact raw amount,
+both read back from the block. Amounts are raw atomic units (1 XNO = 1e30
+raw) encoded as decimal strings.
 
 ### Solana
 

@@ -39,6 +39,7 @@ func TestNewFacilitatorRoutesNetworks(t *testing.T) {
 		{name: "sui prefix routes to sui constructor", scheme: types.Exact, network: "sui:", notContains: "expected a CAIP-2 identifier", errContains: []string{"unsupported Sui network"}},
 		{name: "tron prefix routes to tron constructor", scheme: types.Exact, network: "tron:mainnet", errContains: []string{"not implemented"}},
 		{name: "casper prefix routes to casper constructor", scheme: types.Exact, network: "casper:", notContains: "expected a CAIP-2 identifier"},
+		{name: "nano prefix routes to nano constructor", scheme: types.Exact, network: "nano:", notContains: "expected a CAIP-2 identifier", errContains: []string{"unsupported Nano network"}},
 	}
 
 	for _, tt := range tests {
