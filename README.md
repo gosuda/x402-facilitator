@@ -53,6 +53,23 @@ pay-to destination (a per-invoice Nano account) plus the exact raw amount,
 both read back from the block. Amounts are raw atomic units (1 XNO = 1e30
 raw) encoded as decimal strings.
 
+A block hash alone is a bearer proof (the block is public once broadcast), and
+the in-memory claim set forgets on restart. Two opt-in controls close both:
+
+- **Requester binding.** Set `NANO_FACILITATOR_REQUIRE_BINDING=1` to refuse a
+  bare block hash. The payer then adds `payload.binding = {nonce, signature}`:
+  an Ed25519-BLAKE2b signature, by the key of the account that made the
+  payment, over `"nano-402-binding/1\n" + blockHash + "\n" + nonce + "\n" +
+  resource + "\n" + payTo`. The seller issues `nonce` and `resource` in the
+  402 (`extra.binding`); the facilitator checks the payload nonce equals it and
+  verifies the signature against the block's account **as read from the
+  ledger**. A present binding is always checked. `/supported` advertises
+  `binding` and `bindingRequired`.
+- **Durable claims.** Set `NANO_FACILITATOR_CLAIMS_FILE=/path/claims.jsonl` to
+  append every settled block hash (fsynced before success is reported) and
+  reload it on start. A claim that cannot be written is refused, and a damaged
+  log stops startup rather than starting with a shorter history.
+
 ### Solana
 
 Solana networks are `solana:mainnet`, `solana:devnet`, and other

@@ -14,6 +14,7 @@ package facilitator
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/gosuda/x402-facilitator/scheme"
@@ -27,6 +28,15 @@ var _ scheme.Facilitator = (*NanoFacilitator)(nil)
 // endpoints are supplied through configuration.
 const NanoFacilitatorURLEnv = "NANO_FACILITATOR_RPC_URLS"
 
+const (
+	// NanoClaimsFileEnv names a file for the durable claim log. When set,
+	// NewNanoFacilitator keeps spent blocks spent across restarts.
+	NanoClaimsFileEnv = "NANO_FACILITATOR_CLAIMS_FILE"
+	// NanoRequireBindingEnv ("1" or "true") makes a nano-block-sig/1 binding
+	// mandatory, so a bare block hash is no longer a valid payment proof.
+	NanoRequireBindingEnv = "NANO_FACILITATOR_REQUIRE_BINDING"
+)
+
 // NanoFacilitator settles x402 "exact" payments on Nano. It verifies a payment
 // block on at least two independent RPC nodes and binds it exactly once.
 type NanoFacilitator struct {
@@ -34,7 +44,8 @@ type NanoFacilitator struct {
 	network     string
 	client      *nanoscheme.Client
 	endpoints   []string
-	claims      *ClaimStore
+	claims      Claimer
+	requireBind bool
 	asset       string
 	decimals    int
 	networkName string
@@ -48,13 +59,33 @@ type NanoFacilitatorOptions struct {
 	// Client overrides the RPC transport (the test seam). When nil, a real
 	// HTTP client is built.
 	Client *nanoscheme.Client
+	// Claims is the single-use claim store. When nil an in-memory store is
+	// used, which forgets on restart; pass a FileClaimStore (or any Claimer)
+	// to keep spent blocks spent across restarts.
+	Claims Claimer
+	// RequireBinding makes a payment valid only with a nano-block-sig/1
+	// binding signed by the account that made the payment (see binding.go).
+	// A binding that is present is always checked, whatever this says.
+	RequireBinding bool
 }
 
 // NewNanoFacilitator builds a Nano facilitator for a CAIP-2 Nano network.
 // privateKeyHex is unused: the payer broadcasts its own send block and the
 // facilitator never signs, moves or holds funds.
 func NewNanoFacilitator(network, rpcURL, privateKeyHex string) (*NanoFacilitator, error) {
-	return NewNanoFacilitatorWithOptions(network, rpcURL, privateKeyHex, NanoFacilitatorOptions{})
+	opts := NanoFacilitatorOptions{}
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(NanoRequireBindingEnv))) {
+	case "1", "true", "yes":
+		opts.RequireBinding = true
+	}
+	if path := strings.TrimSpace(os.Getenv(NanoClaimsFileEnv)); path != "" {
+		cs, err := NewFileClaimStore(path)
+		if err != nil {
+			return nil, fmt.Errorf("nano claim log: %w", err)
+		}
+		opts.Claims = cs
+	}
+	return NewNanoFacilitatorWithOptions(network, rpcURL, privateKeyHex, opts)
 }
 
 // NewNanoFacilitatorWithOptions builds a Nano facilitator with explicit
@@ -81,12 +112,18 @@ func NewNanoFacilitatorWithOptions(network, rpcURL string, privateKeyHex string,
 		client = nanoscheme.NewClient(0)
 	}
 
+	var claims Claimer = opts.Claims
+	if claims == nil {
+		claims = NewClaimStore()
+	}
+
 	return &NanoFacilitator{
 		scheme:      types.Exact,
 		network:     network,
 		client:      client,
 		endpoints:   endpoints,
-		claims:      NewClaimStore(),
+		claims:      claims,
+		requireBind: opts.RequireBinding,
 		asset:       nanoscheme.AssetXNO,
 		decimals:    nanoscheme.XNORawDecimals,
 		networkName: info.NetworkName,
@@ -132,6 +169,11 @@ func (t *NanoFacilitator) Verify(ctx context.Context, payload *types.PaymentPayl
 			InvalidMessage: res.Reason,
 			Payer:          res.Payer,
 		}, nil
+	}
+
+	if bad := t.checkBinding(payload, req, blockHash, res.Payer); bad != nil {
+		bad.Payer = res.Payer
+		return bad, nil
 	}
 
 	return &types.PaymentVerifyResponse{
@@ -197,6 +239,8 @@ func (t *NanoFacilitator) Supported() *types.SupportedResponse {
 				"decimals":            t.decimals,
 				"networkId":           t.network,
 				"networkName":         t.networkName,
+				"binding":             nanoscheme.BindingScheme,
+				"bindingRequired":     t.requireBind,
 			},
 		}},
 		Extensions: []string{},
