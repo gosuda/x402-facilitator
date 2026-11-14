@@ -191,6 +191,47 @@ the settlement backend: the chain facilitators in this repository (EVM from
 `scheme/<chain>/facilitator`) and the remote `api/client.Client` for talking
 to a separate facilitator deployment.
 
+### Configuration-driven routes (`resource/paywall`)
+
+Applications that take the payment network as configuration rather than code
+(a tunnel, a reverse proxy) use `resource/paywall`. It builds one `Gate` per
+paid route prefix from a CAIP-2 network, a pay-to address and a human amount,
+and wraps the application's existing router once:
+
+```go
+pw, err := paywall.New(paywall.Config{
+	Network:   "nano:mainnet",
+	PayTo:     "nano_...",
+	Endpoints: []string{"https://rpc.nano.to", "https://rainstorm.city/api"},
+	Options:   map[string]string{paywall.OptionNanoClaimsFile: "/var/lib/app/claims.jsonl"},
+}, []paywall.Route{
+	{Prefix: "/paid", Amount: "0.01", Methods: []string{"GET"}},
+	{Prefix: "/"}, // unpaid routes are listed too, so a longer free prefix shadows a paid one
+})
+if err != nil {
+	return err
+}
+defer pw.Close() // releases RPC connections and claim logs
+handler := pw.Wrap(router)
+```
+
+Requests are matched to the longest route prefix on path segment boundaries
+after the path is cleaned (`paywall.CleanPath`); only a paid route and method
+must pay. When any route is paid, the paywall also serves `/x402/prepare`
+(Sui: unsigned transactions to sign; other networks: the route's 402) and
+`/x402/client.js`. The application never names a chain: conversion,
+validation, facilitator construction and network options are owned here.
+
+| Network | `Asset` | `Endpoints` | `Options` |
+|---|---|---|---|
+| `sui:mainnet`, `sui:testnet` (default; `Testnet` picks testnet) | gasless USDC, fixed | Sui RPC fallback list | none |
+| `casper:casper`, `casper:casper-test` | wCSPR CEP-18 contract hash, required | first entry is the facilitator URL (default CSPR.cloud, needs `FacilitatorToken`) | none |
+| `nano:mainnet` | XNO, fixed | at least two independent RPC nodes, or none for the defaults | `nano_claims_file`, `nano_require_binding` |
+
+An unknown option key is an error, so a misspelled option is never silently
+dropped. Applications that compose one chain in code should keep using
+`resource/http` and the `scheme/<chain>` packages directly.
+
 ## Module layout
 
 The repository is split into three Go modules with one-directional
