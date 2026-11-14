@@ -269,6 +269,36 @@ func TestFileClaimStoreToleratesTornTailButNotMidFileDamage(t *testing.T) {
 	}
 }
 
+// A complete final record without its newline is a spent block, not a torn
+// write: it must stay spent on every later open, not only the first one.
+func TestFileClaimStoreKeepsUnterminatedFinalRecord(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "claims.jsonl")
+	if err := os.WriteFile(path, []byte(`{"hash":"AA","at":"x"}`+"\n"+`{"hash":"BB","at":"x"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for open := 1; open <= 3; open++ {
+		s, err := NewFileClaimStore(path)
+		if err != nil {
+			t.Fatalf("open %d: %v", open, err)
+		}
+		if !s.Spent("AA") || !s.Spent("BB") {
+			t.Fatalf("open %d: a complete record became spendable", open)
+		}
+		if open == 2 && !s.Claim("CC") {
+			t.Fatal("claim after the terminated record failed")
+		}
+		_ = s.Close()
+	}
+	s, err := NewFileClaimStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if !s.Spent("CC") {
+		t.Fatal("CC lost: the append glued onto the unterminated record")
+	}
+}
+
 func TestFileClaimStoreModeAndEmptyPath(t *testing.T) {
 	if _, err := NewFileClaimStore(""); err == nil {
 		t.Fatal("empty path accepted")

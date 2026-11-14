@@ -98,13 +98,15 @@ func NewFileClaimStore(path string) (*FileClaimStore, error) {
 		return nil, err
 	}
 	lines := strings.Split(string(data), "\n")
+	tornTail := false
 	for i, line := range lines {
 		if strings.TrimSpace(line) == "" {
 			continue
 		}
 		var rec claimRecord
 		if err := json.Unmarshal([]byte(line), &rec); err != nil || rec.Hash == "" {
-			if i == len(lines)-1 { // no trailing newline: a torn last write
+			if i == len(lines)-1 { // unterminated and unreadable: a torn last write
+				tornTail = true
 				continue
 			}
 			_ = f.Close()
@@ -112,16 +114,30 @@ func NewFileClaimStore(path string) (*FileClaimStore, error) {
 		}
 		s.spent[rec.Hash] = struct{}{}
 	}
-	// Drop a torn tail so the next append starts on a clean line; it was
-	// never reported as claimed, so nothing the caller relied on is lost.
-	if len(data) > 0 && data[len(data)-1] != '\n' {
-		keep := strings.LastIndexByte(string(data), '\n') + 1
-		if err := f.Truncate(int64(keep)); err != nil {
-			_ = f.Close()
-			return nil, err
-		}
+	if err := repairUnterminatedTail(f, data, tornTail); err != nil {
+		_ = f.Close()
+		return nil, err
 	}
 	return s, nil
+}
+
+// repairUnterminatedTail makes the next append start on a clean line when
+// the log does not end in a newline. A torn tail was never reported as
+// claimed, so it is dropped. A complete record without its newline (for
+// example a log that was edited or restored) is a spent block: it is kept
+// and terminated, because dropping it would make that block spendable again
+// on the next open.
+func repairUnterminatedTail(f *os.File, data []byte, torn bool) error {
+	if len(data) == 0 || data[len(data)-1] == '\n' {
+		return nil
+	}
+	if torn {
+		return f.Truncate(int64(strings.LastIndexByte(string(data), '\n') + 1))
+	}
+	if _, err := f.Write([]byte{'\n'}); err != nil {
+		return err
+	}
+	return f.Sync()
 }
 
 // Claim atomically records blockHash as spent, durably. It returns false for a
